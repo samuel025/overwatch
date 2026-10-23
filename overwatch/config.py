@@ -124,6 +124,7 @@ class Config:
     max_parallel_investigations: int = 2
     trace_dir: str = "traces"
     state_path: str = ""  # SQLite file for incidents; default <trace_dir>/overwatch.db
+    state_url: str = ""  # or a Postgres URL: Overwatch's own history in a real database (what Zetaris registers)
     console_token: str = ""  # required by the web console/API when set
 
 
@@ -222,5 +223,6 @@ def load_config(path: str | Path) -> Config:
         max_parallel_investigations=int(watch.get("max_parallel_investigations", 2)),
         trace_dir=raw.get("trace_dir", "traces"),
         state_path=raw.get("state_path", ""),
+        state_url=raw.get("state_url") or os.environ.get("OVERWATCH_STATE_URL", ""),
         console_token=(raw.get("console") or {}).get("token", "") or os.environ.get("OVERWATCH_TOKEN", ""),
     )

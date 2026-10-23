@@ -197,17 +197,13 @@ def create_app(ow: Overwatch | None, watch: bool = True, token: str | None = Non
 
     @app.post("/api/setup/test-ai")
     def setup_test_ai(body: AiIn) -> dict:
-        from openai import OpenAI
+        from .llm import probe
 
         base = body.base_url or os.environ.get("LLM_BASE_URL", "")
         key = body.api_key or os.environ.get("LLM_API_KEY", "")
         if not base:
             return {"ok": False, "error": "Enter the AI provider's address."}
-        try:
-            models = [m.id for m in OpenAI(base_url=base, api_key=key or "none", timeout=15, max_retries=0).models.list().data]
-        except Exception as e:
-            return {"ok": False, "error": f"{e.__class__.__name__}: {str(e)[:200]}"}
-        return {"ok": True, "models": models[:200]}
+        return probe(base, key)
 
     @app.post("/api/setup/apply")
     def setup_apply(body: ApplyIn) -> dict:

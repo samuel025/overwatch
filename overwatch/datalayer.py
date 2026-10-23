@@ -46,7 +46,10 @@ def to_jdbc(sqlalchemy_url: str) -> dict[str, str]:
     if backend not in JDBC_DRIVERS:
         raise ValueError(f"cannot register a '{backend}' database with Zetaris yet (supported: {', '.join(JDBC_DRIVERS)})")
     port = f":{url.port}" if url.port else ""
-    return {"jdbcurl": f"jdbc:{backend}://{url.host}{port}/{url.database or ''}", "jdbcdriver": JDBC_DRIVERS[backend],
+    host = url.host
+    if host in ("localhost", "127.0.0.1", "::1") and os.environ.get("ZETARIS_HOST_ALIAS"):
+        host = os.environ["ZETARIS_HOST_ALIAS"]  # Zetaris runs in Docker: "localhost" there is not the user's machine
+    return {"jdbcurl": f"jdbc:{backend}://{host}{port}/{url.database or ''}", "jdbcdriver": JDBC_DRIVERS[backend],
             "username": url.username or "", "password": url.password or ""}
 
 

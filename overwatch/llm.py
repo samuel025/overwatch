@@ -126,3 +126,26 @@ def extract_json(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             continue
     return None
+
+
+def probe(base_url: str, api_key: str = "", timeout: float = 15) -> dict[str, Any]:
+    """Check an AI provider. A Meterless Runtime (answers /healthz) gets its extra checks: the placeholder
+    token `rt-local` is rejected, and the app headers are sent."""
+    import httpx
+
+    root = base_url.rstrip("/").removesuffix("/v1")
+    runtime = False
+    try:
+        runtime = httpx.get(f"{root}/healthz", timeout=3).status_code == 200
+    except Exception:
+        pass
+    if runtime and api_key.strip() == "rt-local":
+        return {"ok": False, "error": "rt-local is a placeholder and Meterless Runtime rejects it. "
+                "Use the token in <stateDir>/proxy-token."}
+    try:
+        client = OpenAI(base_url=base_url, api_key=api_key or "none", timeout=timeout, max_retries=0,
+                        default_headers={"meterless-app": "overwatch", "meterless-scope": "user"} if runtime else None)
+        models = [m.id for m in client.models.list().data]
+    except Exception as e:
+        return {"ok": False, "error": f"{e.__class__.__name__}: {str(e)[:200]}"}
+    return {"ok": True, "models": models[:200], "meterless_runtime": runtime}

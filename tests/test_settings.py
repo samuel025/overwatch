@@ -74,3 +74,12 @@ def test_removing_an_external_drops_its_checks_and_edges(tmp_path, monkeypatch):
     cfg = load_config(path)
     assert "psp.example.com" not in cfg.services and "card_errors" not in {c.name for c in cfg.checks}
     assert "api" not in cfg.topology or cfg.topology["api"] == []
+
+
+def test_probe_rejects_placeholder_token(monkeypatch):
+    import httpx
+    from overwatch import llm
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: type("R", (), {"status_code": 200})())
+    out = llm.probe("http://127.0.0.1:8088/v1", "rt-local")
+    assert not out["ok"] and "rt-local" in out["error"]

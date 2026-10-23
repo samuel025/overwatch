@@ -92,6 +92,11 @@ class ZetarisSource(DataSource):
         flow with the deployment's admin account; never reachable by agents (they only call query())."""
         done = []
         for s in statements:
+            if s.upper().startswith("CREATE DATASOURCE "):  # re-running setup must replace, not fail "already exists"
+                try:
+                    self._run("DROP DATASOURCE " + s.split()[2], None)
+                except SourceError:
+                    pass
             self._run(s, None)
             done.append(s.split("(")[0].strip()[:80])
         return done

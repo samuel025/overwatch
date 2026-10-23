@@ -304,3 +304,27 @@ def test_reported_changes_are_queryable_through_the_built_in_source(world):
         assert c.post("/api/changes", json={"service": "b", "version": "1.0"}).status_code == 200
     assert len(ow.sources["overwatch"].query("SELECT * FROM changes")) == 2
     ow.stop()
+
+
+def test_every_check_value_is_kept_and_queryable_by_the_investigator(world):
+    make, set_value = world
+    ow = make()
+    ow.check_once()
+    set_value("a", 50)  # a_high now fails
+    ow.check_once()
+    rows = ow.store.rows("SELECT check_name, value, failing FROM check_samples ORDER BY ts, check_name")
+    assert ("a_high", 1.0, 0) in rows and ("a_high", 50.0, 1) in rows and ("b_high", 1.0, 0) in rows
+    # the Investigator reads the same history through the built-in `overwatch` source
+    assert ow.sources["overwatch"].query("SELECT count(*) AS n FROM check_samples WHERE check_name = 'a_high'") == [{"n": 2}]
+    assert "check_samples(" in ow.cfg.catalog and "reported_changes" in {e.name for e in ow.evidence}
+
+
+def test_own_history_is_read_through_zetaris_when_it_is_the_data_layer(world, monkeypatch):
+    make, _ = world
+    ow = make()
+    assert ow.own_data == {"source": "overwatch", "prefix": "", "dialect": "sqlite"}
+    ow.store.dialect = "postgresql"  # as if state_url pointed at Postgres
+    assert ow._own_data_target(ow.cfg)["dialect"] == "postgresql"  # no Zetaris: read it directly
+    monkeypatch.setenv("ZETARIS_JDBC_URL", "jdbc:zetaris://x")
+    ow.cfg.sources["zetaris"] = {"type": "zetaris", "jdbc_url": "jdbc:zetaris://x", "driver_class": "com.Z"}
+    assert ow._own_data_target(ow.cfg) == {"source": "zetaris", "prefix": "overwatch.", "dialect": "spark"}

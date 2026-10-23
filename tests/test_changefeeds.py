@@ -37,7 +37,7 @@ def test_github_feed_records_recent_changes_once(tmp_path):
     feed.client = httpx.Client(base_url="https://api.github.com", transport=httpx.MockTransport(github_handler))
     assert feed.run_once() == 3  # the draft and the 30-day-old release are skipped
     assert feed.run_once() == 0  # nothing new: de-duplicated by ref
-    rows = store._db.execute("SELECT service, version, kind, author FROM changes ORDER BY ts").fetchall()
+    rows = store.rows("SELECT service, version, kind, author FROM changes ORDER BY ts")
     assert ("payments", "v1.4.0", "release", "ana") in rows and ("payments", "abcdef1", "deploy", "ci") in rows
     assert ("payments", "1234567", "deploy", "ana") in rows
 

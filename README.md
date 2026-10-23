@@ -135,7 +135,7 @@ flowchart LR
 | **Meterless Nightshift** (provider, "Power") | Primary AI provider | Every model call goes through one OpenAI-compatible client (`overwatch/llm.py`) pointed at Nightshift's local endpoint, with the `meterless-app` / `meterless-scope` headers and the bearer token from Nightshift's `proxy-token` file. Each call is logged to `traces/llm_calls.jsonl`. | `.env` (`LLM_BASE_URL`), the console's *Under the hood → AI calls* |
 | **NVIDIA Nemotron** | Model (NVIDIA award) | Powers the Investigator's reasoning. Connected as a provider inside Nightshift; during development it can also be called directly at `integrate.api.nvidia.com`. Tested with `nvidia/nemotron-3-ultra-550b-a55b`. | The console header (*AI*) |
 
-> **Status, honestly:** the Zetaris integration is written from Zetaris's documentation and unit-tested against a fake JDBC connection, but **has not yet been run against a real Zetaris install**. Until it is, the demo reads two Postgres databases directly (the `direct` backend). The Investigator has been tested against NVIDIA's API directly because Nightshift has no Linux edition. Switching to Nightshift is a two-line change in `.env` (see [Using Nightshift from another machine](#using-nightshift-from-another-machine)). Switching to Zetaris is setting the `ZETARIS_*` variables and re-running setup.
+> **Status, honestly:** the Zetaris integration is written from Zetaris's documentation and unit-tested against a fake JDBC connection, but **has not yet been run against a real Zetaris install**. Until it is, the demo reads two Postgres databases directly (the `direct` backend). The Investigator has been tested against NVIDIA's API directly because Nightshift's current build targets NVIDIA DGX Spark (ARM64) and there is no Ubuntu x86_64 installer; Meterless confirmed that integrating Meterless Runtime as a provider (done: `overwatch/llm.py`) and testing with NVIDIA's hosted API satisfies the requirement. Switching to Nightshift is a two-line change in `.env` (see [Using Nightshift from another machine](#using-nightshift-from-another-machine)). Switching to Zetaris is setting the `ZETARIS_*` variables and re-running setup.
 
 ---
 
@@ -280,9 +280,11 @@ You do not have to write the configuration by hand. Tell Overwatch **where thing
 overwatch run          # no overwatch.yaml here yet -> the console opens on "Connect your system"
 ```
 
-1. **Connect:** Docker is detected automatically (pick the Compose project); optionally add a Prometheus address and any databases or Zetaris; choose an AI provider (one click fills Nightshift or NVIDIA) and **Test connection**.
-2. **Review:** a map of the discovered system, a sentence per service to fill in (TODOs are highlighted: they help the Investigator most), the proposed checks with a reason for each (switch any off), the evidence pack, and a preview of the file it will write.
-3. **Save and start watching:** writes the files and starts watching immediately, no restart. An existing config is kept as a backup. The **Setup** link in the console header brings you back here.
+1. **Connect:** pick where your services run: Docker (detected automatically; choose the Compose project), a Kubernetes cluster (the service account is used inside a cluster; outside, give the API server and a token) and/or Loki for logs. Optionally add a Prometheus address and any databases; choose an AI provider (one click fills Nightshift or NVIDIA) and **Test connection**.
+2. **Review system:** a map of the discovered system, the **external services** it found (add, rename or remove them; set a status URL and the error text to watch for), a sentence per service to fill in (amber fields help the Investigator most).
+3. **Checks & alerts:** the proposed checks with a reason for each (switch any off), the evidence pack, **notifications** (Slack, Jira, webhook), watch timings and approval mode, and a preview of the file it will write. **Save and start watching** writes the files and starts immediately, no restart; an existing config is kept as a backup.
+
+The **Settings** button in the console header opens [the settings page](#the-settings-page) for later changes; **Run discovery again** there brings you back to this flow.
 
 **2. One command:**
 
@@ -335,6 +337,10 @@ Overwatch reads everything through one data layer with two backends:
 - **`zetaris`**: set when the deployment's environment has `ZETARIS_JDBC_URL`. The setup page is unchanged for the user, but when they save, Overwatch registers each database they connected in Zetaris (`CREATE DATASOURCE … OPTIONS (jdbcurl …)` then `REGISTER DATASOURCE TABLES FROM …`), writes the generated checks and evidence as Spark SQL over `<datasource>.<table>`, and the agents query only Zetaris. The user's database address is kept in `.env` (`OW_<NAME>_URL`) so it can be registered again.
 
 Zetaris is reached over JDBC with Zetaris's own driver (Java and `pip install overwatch[zetaris]`). Only Overwatch's setup flow can run registration statements; the agents can only run `SELECT`, `WITH`, `SHOW` and `DESCRIBE`. Docker, Kubernetes and Loki stay direct sources next to it.
+
+**Overwatch's own history goes through the data layer too.** Every install has data of its own, whatever stack the user has: the change log, incident history, and the value of every check on every pass (`check_samples`, kept 7 days, so baselines and history survive restarts). By default these live in a SQLite file. Set `state_url` (or `OVERWATCH_STATE_URL`) to a Postgres database and Overwatch keeps them there instead; when Zetaris is the data layer, Overwatch registers that database as the datasource `overwatch` on startup, so one query can join "what changed" and "how the metric moved" with the user's own tables (`overwatch.changes`, `overwatch.check_samples`). The change-log evidence and the catalog the Investigator reads switch to Spark SQL automatically. This is written from Zetaris's documentation and not yet run against a real Zetaris; the time comparison (`to_timestamp(ts)`) in particular is unverified.
+
+Business-impact queries (`impact:`) and any checks over the user's own tables are ordinary SQL sources, so pointing them at the `zetaris` source (with `<datasource>.<table>` names and Spark SQL) puts them through the data layer as well.
 
 ### Built in, no setup needed
 
@@ -626,6 +632,7 @@ console:
 
 trace_dir: traces                    # traces, investigation logs
 state_path: ""                       # SQLite incident store; default <trace_dir>/overwatch.db
+state_url: ""                        # or a Postgres URL (env OVERWATCH_STATE_URL): Overwatch's own history in a real database
 ```
 
 ### Environment variables
@@ -634,6 +641,7 @@ state_path: ""                       # SQLite incident store; default <trace_dir
 |---|---|
 | `LLM_BASE_URL`, `LLM_API_KEY`, `OVERWATCH_MODEL`, `OVERWATCH_TRIAGE_MODEL` | AI provider (Nightshift or NVIDIA) |
 | `OW_<SOURCE>_URL` | Database addresses written by discovery |
+| `OVERWATCH_STATE_URL` | Postgres URL for Overwatch's own history (change log, incidents, check history); default is a SQLite file |
 | `MEMORY_URL`, `MEMORY_TOKEN` | H-MEM service |
 | `OVERWATCH_TOKEN` | Console/API token |
 | `ZETARIS_JDBC_URL`, `ZETARIS_DRIVER_CLASS`, `ZETARIS_DRIVER_JAR`, `ZETARIS_USER`, `ZETARIS_PASSWORD` | The deployment's Zetaris workspace (the data layer); end users never set these |
@@ -674,8 +682,24 @@ Nightshift runs on Windows (with a dedicated GPU), Apple Silicon Macs and DGX Sp
 | **Signals** | Every check grouped by service, with a sparkline and its alert line |
 | **Incidents** | History. Clicking one pins it; **Back to live** follows new incidents again |
 | **Diagnosis details** | The fast **first guess** while investigating; then the explanations considered with verdicts, the evidence quotes with ✓/⚠, and the **evidence check** ("6/6 quotes found in the data") |
-| **Setup** (header link) | The connect → review → start flow described in [Connecting](#connecting-three-ways) |
+| **Settings** (header button) | Edit the running configuration without re-running discovery: see [The settings page](#the-settings-page) |
 | **Under the hood** | Data sources, H-MEM memories and trust ledger, and every AI call (agent, seconds, tokens, provider) |
+
+### The settings page
+
+The **Settings** button in the header opens a page with sections down the left. Every change is written to `overwatch.yaml` (secrets to `.env`) and applied live, with no restart. A bar at the bottom appears when you have unsaved changes (**Discard** / **Save and apply**), and the previous file is kept as `overwatch.yaml.bak-<time>`.
+
+| Section | What you can change |
+|---|---|
+| **System & services** | The system description, and per service what it does and what normal looks like |
+| **External services** | Add, rename, remove or switch off third-party APIs; which of your services call each; a health/status URL; the error text to watch for in logs. Hand-written checks are updated in place |
+| **Checks** | Switch each check on or off; change its severity and limit |
+| **AI provider** | Nightshift / NVIDIA presets or any OpenAI-compatible address, key, models, investigation steps, **Test connection** |
+| **Notifications** | Slack, Jira, generic webhook (secrets go to `.env`; saved values show as "saved", never as text) |
+| **Watching & approval** | Check interval, confirm passes, recovery and merge windows, cooldown, parallel investigations, manual or automatic sending |
+| **Connections** | The data sources in use; **Run discovery again** to add a database, Prometheus, Kubernetes or Loki |
+
+If the new configuration fails to load, the save is rejected with the reason and the old file is restored. Saving rewrites the YAML: the opening comment block is kept, comments further down are not (they remain in the backup). The page deep-links, e.g. `#settings/notify`.
 
 ### Building the console
 
@@ -726,10 +750,12 @@ All endpoints are under the console's address. When a console token is set, send
 | `POST /api/incidents/{id}/resolve` | — | Marks it recovered (needed for problems reported by people) |
 | `POST /api/changes` | `{"service", "version"?, "kind"?, "author"?, "description"?, "ts"?}` | Records a release or config change |
 | `POST /api/ingest` | `{"source", "service", "title", "description"}` or an Alertmanager webhook | Opens (or joins) an incident from a pushed alert |
-| `GET /api/setup/state` | — | Whether a config exists; Docker availability and Compose projects |
-| `POST /api/setup/discover` | `{"docker": {"enabled", "project", "service_label"}, "prometheus_url", "databases": [{"name", "url"}]}` | Runs discovery; returns the plan and the YAML it would write |
+| `GET /api/setup/state` | — | Whether a config exists; Docker availability and Compose projects; whether Overwatch runs inside a Kubernetes cluster |
+| `POST /api/setup/discover` | `{"docker": {"enabled", "project", "service_label"}, "kubernetes": {"enabled", "url", "token", "namespace", "service_label"}, "loki": {"url", "tenant", "token"}, "prometheus_url", "databases": [{"name", "url"}]}` | Runs discovery; returns the plan and the YAML it would write |
 | `POST /api/setup/test-ai` | `{"base_url", "api_key"}` | Lists the provider's models |
-| `POST /api/setup/apply` | `{"plan", "ai": {"base_url", "api_key", "model", "triage_model"}}` | Writes `overwatch.yaml` + `.env` and starts watching |
+| `POST /api/setup/apply` | `{"plan", "ai": {"base_url", "api_key", "model", "triage_model"}}` | Writes `overwatch.yaml` + `.env` and starts watching (plan may carry `settings`: notifiers, watch timings, approval) |
+| `GET /api/settings` | — | The running configuration as editable sections; saved secrets appear only as `*_set: true` |
+| `PUT /api/settings` | the edited sections (`system`, `services`, `externals`, `checks`, `ai`, `notifiers`, `watch`, `approval`) | Saves to `overwatch.yaml` / `.env`, applies live; 400 with the reason if the result would not load |
 
 ### Event types
 
@@ -823,7 +849,7 @@ Run them with the project's Python (`../../../.venv/bin/python` from `scripts/`)
 ### Automated tests
 
 ```bash
-pytest                                       # 115 offline tests: no database, AI or memory service needed
+pytest                                       # 117 offline tests: no database, AI or memory service needed
 cd memory-service && npm run conformance     # official H-MEM conformance suite
 ```
 

@@ -42,7 +42,8 @@ class Overwatch:
         self.trace_dir = Path(cfg.trace_dir)
         self.trace_dir.mkdir(parents=True, exist_ok=True)
         self.events = EventBus()
-        self.store = IncidentStore(cfg.state_path or self.trace_dir / "overwatch.db")
+        self.store = IncidentStore(cfg.state_url or cfg.state_path or self.trace_dir / "overwatch.db")
+        self.own_data = self._own_data_target(cfg)
         self.sources = build_sources(self._with_builtin_sources(cfg))
         self.evidence = self._with_default_evidence(cfg)
         self.llm = LLM(cfg.llm, self.trace_dir)
@@ -68,19 +69,59 @@ class Overwatch:
         self.listeners += build_feeds(cfg.changes, self._record_feed_change, self.sources,
                                       on_error=lambda msg: self.events.emit("source.error", message=msg))
         self._restore()
+        self._last_prune = 0.0
+        self._register_own_data()
+
+    def _own_data_target(self, cfg: Config) -> dict[str, str]:
+        """Where the Investigator reads Overwatch's own history: the source, the table prefix and the SQL dialect.
+
+        SQLite file: read directly. Postgres (state_url): read directly, or through Zetaris when this deployment's
+        data layer is Zetaris, so the history can be joined with the user's own databases in one query."""
+        from .datalayer import zetaris_env
+
+        if self.store.dialect == "sqlite":
+            return {"source": "overwatch", "prefix": "", "dialect": "sqlite"}
+        if zetaris_env() and any(s.get("type") == "zetaris" for s in cfg.sources.values()):
+            zet = next(n for n, s in cfg.sources.items() if s.get("type") == "zetaris")
+            return {"source": zet, "prefix": "overwatch.", "dialect": "spark"}
+        return {"source": "overwatch", "prefix": "", "dialect": "postgresql"}
+
+    def _register_own_data(self) -> None:
+        """With Zetaris as the data layer, register Overwatch's own database there (once; safe to repeat)."""
+        if self.own_data["dialect"] != "spark":
+            return
+        from .datalayer import register
+
+        try:
+            register({"overwatch": self.store.url})
+        except Exception as e:  # already registered, or Zetaris is down: the console shows it, watching goes on
+            self.events.emit("source.error", message=f"registering Overwatch's own data with Zetaris: {e}")
 
     def _with_builtin_sources(self, cfg: Config) -> dict[str, dict[str, Any]]:
         """Add the read-only `overwatch` change log (and describe the built-ins) so they work with no setup."""
         sources = dict(cfg.sources)
         notes = []
-        if "overwatch" not in sources:
+        own = getattr(self, "own_data", {"dialect": "sqlite", "prefix": "", "source": "overwatch"})
+        if "overwatch" not in sources and own["dialect"] == "sqlite":
             path = Path(self.store.path).resolve()
             sources["overwatch"] = {"type": "sql", "url": f"sqlite:///file:{path}?mode=ro&uri=true"}
-            notes.append(
-                "overwatch (SQLite SQL, built in): changes(ts TEXT ISO-8601 UTC, service, version, kind, author, "
-                "description): every release/config change reported to Overwatch. "
-                "Time windows: WHERE ts > strftime('%Y-%m-%dT%H:%M:%S', 'now', '-30 minutes')"
-            )
+        elif "overwatch" not in sources and own["dialect"] == "postgresql":
+            sources["overwatch"] = {"type": "postgres", "url": self.store.url}
+        if own["dialect"] == "sqlite":
+            where = "Time windows: WHERE ts > strftime('%Y-%m-%dT%H:%M:%S', 'now', '-30 minutes')"
+            label = "overwatch (SQLite SQL, built in)"
+        elif own["dialect"] == "postgresql":
+            where = "Time windows: WHERE ts::timestamptz > now() - interval '30 minutes'"
+            label = "overwatch (PostgreSQL SQL, built in)"
+        else:
+            where = "Time windows: WHERE to_timestamp(ts) > current_timestamp() - INTERVAL 30 MINUTES"
+            label = f"overwatch.<table> (in Zetaris, Spark SQL, built in; query source {own['source']})"
+        p = own["prefix"]
+        notes.append(
+            f"{label}: {p}changes(ts TEXT ISO-8601 UTC, service, version, kind, author, description): every release/"
+            f"config change reported to or learned by Overwatch. {p}check_samples(ts TEXT ISO-8601 UTC, check_name, "
+            f"service, value, failing 0/1): every check's value on every pass for the last 7 days. {where}"
+        )
         if any(s.get("type") == "docker" for s in sources.values()) and "docker:" not in cfg.catalog:
             notes.append(
                 "docker (built in, commands not SQL): `containers` (state, exit_code, oom_killed, restarts, limits), "
@@ -100,10 +141,15 @@ class Overwatch:
     def _with_default_evidence(self, cfg: Config) -> list[EvidenceConfig]:
         evidence = list(cfg.evidence)
         names = {e.name for e in evidence}
+        own = self.own_data
+        window = {"sqlite": "strftime('%Y-%m-%dT%H:%M:%S', 'now', '-60 minutes')",
+                  "postgresql": "now() - interval '60 minutes'",
+                  "spark": "current_timestamp() - INTERVAL 60 MINUTES"}[own["dialect"]]
+        column = {"sqlite": "ts", "postgresql": "ts::timestamptz", "spark": "to_timestamp(ts)"}[own["dialect"]]
         defaults = [EvidenceConfig(
-            "reported_changes", "Changes reported to Overwatch in the last hour", "overwatch",
-            "SELECT ts, service, version, kind, author, description FROM changes "
-            "WHERE ts > strftime('%Y-%m-%dT%H:%M:%S', 'now', '-60 minutes') ORDER BY ts DESC LIMIT 20")]
+            "reported_changes", "Changes reported to Overwatch in the last hour", own["source"],
+            f"SELECT ts, service, version, kind, author, description FROM {own['prefix']}changes "
+            f"WHERE {column} > {window} ORDER BY ts DESC LIMIT 20")]
         docker = next((n for n, s in cfg.sources.items() if s.get("type") == "docker"), None) or (
             "docker" if cfg.docker else None)
         if docker:
@@ -142,10 +188,22 @@ class Overwatch:
         anomalies = self.watcher.run()
         self.failing = {a.check for a in anomalies}
         self.last_check_at = now_iso()
+        self._record_samples()
         self.events.emit("watch.tick", values=dict(self.watcher.last_values),
                          failing=[a.check for a in anomalies], suspected=sorted(self.watcher.suspected))
         self._track_recovery(self.failing)
         return self.ingest(anomalies)
+
+    def _record_samples(self) -> None:
+        """Keep every check's value (history survives restarts and is queryable). Never breaks watching."""
+        try:
+            services = {c.name: c.service for c in self.cfg.checks}
+            self.store.record_samples(dict(self.watcher.last_values), services, self.failing)
+            if time.time() - self._last_prune > 3600:
+                self._last_prune = time.time()
+                self.store.prune_samples()
+        except Exception as e:
+            self.events.emit("source.error", message=f"saving check history: {e}")
 
     def ingest(self, anomalies: list[Anomaly]) -> Incident | None:
         """Route anomalies from any origin (checks, pushed events, external alerts) into incidents."""
