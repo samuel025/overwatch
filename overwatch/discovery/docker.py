@@ -132,7 +132,10 @@ def discover_docker(project: str | None, service_label: str = COMPOSE_SERVICE, s
         "Container exit codes: 0 = clean stop (stopped on purpose), 137 = killed (SIGKILL, usually out of memory "
         "when oom_killed is true), 143 = terminated (SIGTERM), other = crash.\n"
         "Restart policies: 'unless-stopped'/'always' restart after a crash but not after a deliberate stop; "
-        "'no' never restarts."
+        "'no' never restarts.\n"
+        "Docker (and Compose) never stops or restarts a container because its health check fails; health status is only "
+        "informational. A container stops only when it exits by itself (crash, out of memory) or when someone or something "
+        "asks Docker to stop or kill it. The 'health' of a container that is not running means nothing."
     )
     return {
         "project": project,

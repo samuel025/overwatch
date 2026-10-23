@@ -75,7 +75,8 @@ class DockerSource(DataSource):
                 "restarts": info.get("RestartCount", 0),
                 "started_at": state.get("StartedAt"),
                 "finished_at": None if state.get("FinishedAt", "").startswith("0001") else state.get("FinishedAt"),
-                "health": (state.get("Health") or {}).get("Status"),
+                # Docker keeps the last health value on a stopped container ('unhealthy' after any stop): meaningless
+                "health": (state.get("Health") or {}).get("Status") if state["Status"] == "running" else None,
                 "cpu_limit": (host.get("NanoCpus") or 0) / 1e9 or None,
                 "memory_limit_mb": (host.get("Memory") or 0) // 2**20 or None,
                 "restart_policy": (host.get("RestartPolicy") or {}).get("Name"),

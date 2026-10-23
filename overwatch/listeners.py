@@ -27,6 +27,7 @@ class DockerEvents:
         self.on_error = on_error
         self._stop = threading.Event()
         self._oom: set[str] = set()  # container ids that were just OOM-killed (the "die" event follows)
+        self._signal: dict[str, str] = {}  # container id -> signal Docker was asked to send (the "die" event follows)
 
     def start(self) -> None:
         threading.Thread(target=self._run, daemon=True, name="docker-events").start()
@@ -63,13 +64,25 @@ class DockerEvents:
         cid = (event.get("Actor") or {}).get("ID", "")
         if action == "oom":
             self._oom.add(cid)
+        elif action == "kill":  # sent through the Docker API (docker stop/kill, compose): never by a crash or the OOM killer
+            self._signal[cid] = attrs.get("signal", "")
         elif action == "die":
             code = attrs.get("exitCode", "?")
-            reason = "was killed for using too much memory (OOM)" if cid in self._oom else f"exited (exit code {code})"
+            signal = self._signal.pop(cid, "")
+            if cid in self._oom:
+                reason = "was killed for using too much memory (OOM)"
+            elif signal:
+                name = _SIGNALS.get(signal, f"signal {signal}")
+                reason = (f"was stopped on request ({name} sent through the Docker API, e.g. `docker stop`, `docker kill` or "
+                          f"compose) and exited with code {code}; it did not crash by itself")
+            else:
+                reason = f"exited (exit code {code})"
             self._oom.discard(cid)
             self.on_event("down", service, instance, f"container {instance} {reason} at {time.strftime('%H:%M:%S', time.gmtime())} UTC")
         elif action == "start":
             self.on_event("up", service, instance, f"container {instance} started")
 
+
+_SIGNALS = {"1": "SIGHUP", "2": "SIGINT", "3": "SIGQUIT", "9": "SIGKILL", "15": "SIGTERM"}
 
 LISTENER_TYPES = {"docker": DockerEvents}

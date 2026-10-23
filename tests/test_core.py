@@ -338,3 +338,38 @@ def test_grounding_handles_empty_results_prose_around_values_and_ordinary_hyphen
     g = grounding.check(inc, "payments-b")
     assert g["verified"] == 3, g["unverified"]
     assert g["unsupported_terms"] == ["config-99"]  # "host-level" is English; config-99 is an id not in the data
+
+
+def test_grounding_flags_state_claims_that_no_query_result_supports():
+    from overwatch import grounding
+
+    # a real case: Postgres was stopped on request, and the model wrote that its health check failed
+    inc = _grounded_incident(
+        "The PostgreSQL container's health check failed and Docker killed the unhealthy container.",
+        [{"step": 1, "quote": "exited"}])
+    g = grounding.check(inc, "postgres runs on Docker Compose")
+    assert "unhealthy / failed health check" in g["unsupported_terms"] and not g["ok"]
+
+
+def test_grounding_accepts_a_state_claim_the_data_shows():
+    from overwatch import grounding
+
+    inc = _grounded_incident("The orders container was out of memory and exited.", [{"step": 1, "quote": "exited"}])
+    inc.evidence[0].rows = [{"instance": "orders", "status": "exited", "oom_killed": True}]
+    g = grounding.check(inc, "orders runs on Docker Compose")
+    assert "out of memory" not in g["unsupported_terms"]
+    inc.evidence[0].rows = [{"instance": "orders", "status": "exited", "oom_killed": False}]
+    assert "out of memory" in grounding.check(inc, "x")["unsupported_terms"]
+
+
+def test_docker_stop_is_reported_as_a_stop_not_a_crash():
+    from overwatch.listeners import DockerEvents
+
+    seen = []
+    ev = DockerEvents({}, lambda *a: seen.append(a))
+    attrs = {"com.docker.compose.service": "postgres"}
+    ev.handle({"Action": "kill", "Actor": {"ID": "c1", "Attributes": {**attrs, "signal": "15"}}})
+    ev.handle({"Action": "die", "Actor": {"ID": "c1", "Attributes": {**attrs, "exitCode": "0"}}})
+    ev.handle({"Action": "die", "Actor": {"ID": "c2", "Attributes": {**attrs, "exitCode": "1"}}})  # a real crash
+    assert "stopped on request" in seen[0][3] and "SIGTERM" in seen[0][3] and "did not crash" in seen[0][3]
+    assert "stopped on request" not in seen[1][3] and "exit code 1" in seen[1][3]

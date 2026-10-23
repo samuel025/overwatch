@@ -34,6 +34,18 @@ _TERM = re.compile(
 )
 
 
+# Plain-English claims about what state something was in. Each needs support in the query results: a model
+# that writes "the container was unhealthy" when no result mentions health is making it up.
+_STATE_CLAIMS = [
+    ("unhealthy / failed health check", re.compile(r"\bunhealthy\b|health.?checks? (?:fail|was failing|were failing)"),
+     re.compile(r"unhealthy|health.?check|healthcheck|\"health\"")),
+    ("out of memory", re.compile(r"\bout[- ]of[- ]memory\b|\boom\b|\boom-?kill"),
+     re.compile(r"out of memory|oom-?kill|\"oom_killed\": true|\boom\b(?!_killed)|\b137\b")),
+    ("deadlock", re.compile(r"\bdeadlock"), re.compile(r"deadlock")),
+    ("disk full", re.compile(r"\bdisk (?:is )?full\b|no space left"), re.compile(r"no space left|disk full|enospc")),
+]
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", str(text).lower()).strip().strip("'\"")
 
@@ -134,6 +146,14 @@ def check(incident: Incident, known_text: str) -> dict[str, Any]:
             continue
         if t not in corpus and t.replace("_", " ").replace("-", " ") not in corpus_loose:
             unsupported.append(term)
+
+    results = _norm(" ".join([
+        json.dumps([e.rows for e in incident.pack], default=str),
+        json.dumps([e.rows for e in incident.evidence], default=str),
+    ]))
+    for label, claim, support in _STATE_CLAIMS:
+        if claim.search(incident.root_cause.lower()) and not support.search(results):
+            unsupported.append(label)
 
     total = len(cited)
     score = (verified / total) if total else 0.0

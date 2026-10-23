@@ -115,3 +115,24 @@ def test_new_types_are_registered_and_container_checks_accept_kubernetes(tmp_pat
     path.write_text("system: {name: s, description: d}\nsources:\n  k: {type: kubernetes, url: 'http://api'}\n"
                     "checks:\n  - {name: api_up, kind: container, service: api}\nllm: {base_url: http://x, api_key: k, investigator_model: m}\n")
     assert load_config(path).checks[0].source == "k"
+
+
+def test_docker_reports_health_only_for_running_containers():
+    from overwatch.sources.docker import DockerSource
+
+    class FakeApi:
+        def containers(self, project):
+            return [{"Id": "a", "Labels": {"com.docker.compose.service": "db"}, "Names": ["/db"], "Image": "pg"},
+                    {"Id": "b", "Labels": {"com.docker.compose.service": "web"}, "Names": ["/web"], "Image": "web"}]
+
+        def inspect(self, cid):
+            status = "exited" if cid == "a" else "running"
+            return {"State": {"Status": status, "ExitCode": 0, "OOMKilled": False, "StartedAt": "x", "FinishedAt": "0001",
+                              "Health": {"Status": "unhealthy" if cid == "a" else "healthy"}},
+                    "HostConfig": {}, "RestartCount": 0}
+
+    src = DockerSource.__new__(DockerSource)
+    src.api, src.project, src.service_label, src.max_rows = FakeApi(), None, "com.docker.compose.service", 50
+    rows = {r["service"]: r for r in src.query("containers")}
+    assert rows["db"]["health"] is None  # a stopped container's stale 'unhealthy' means nothing
+    assert rows["web"]["health"] == "healthy"
