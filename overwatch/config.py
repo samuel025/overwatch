@@ -59,6 +59,7 @@ class CheckConfig:
     relative_factor: float | None = None  # alert when value > factor x this check's own recent median
     relative_min: float = 0.0  # ...and the value is at least this (ignores noise on tiny baselines)
     baseline_minutes: int = 30
+    enabled: bool = True  # switched off from the console's settings page
 
 
 @dataclass
@@ -112,6 +113,7 @@ class Config:
     impacts: list[ImpactConfig] = field(default_factory=list)
     evidence: list[EvidenceConfig] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)  # pushed event streams, e.g. docker
+    changes: list[dict[str, Any]] = field(default_factory=list)  # change feeds: github, kubernetes (see changefeeds.py)
     docker: dict[str, Any] = field(default_factory=dict)  # {project, service_label, socket}: turns on Docker features
     interval_seconds: int = 30
     confirm_samples: int = 2  # a check must breach this many passes in a row to open an incident
@@ -137,7 +139,7 @@ def load_config(path: str | Path) -> Config:
     system = raw.get("system", {})
     llm = raw.get("llm", {})
     watch = raw.get("watch", {})
-    checks = [CheckConfig(**c) for c in raw.get("checks", [])]
+    checks = [c for c in (CheckConfig(**c) for c in raw.get("checks", [])) if c.enabled]
 
     sources = raw.get("sources", {})
     docker = raw.get("docker") or {}
@@ -148,9 +150,10 @@ def load_config(path: str | Path) -> Config:
             if c.kind == "probe" and not c.url:
                 raise ValueError(f"probe '{c.name}' needs a url")
             if c.kind == "container" and not c.source:
-                if "docker" not in sources:
-                    raise ValueError(f"container check '{c.name}' needs a docker: section or a docker source")
-                c.source = "docker"
+                runtime = next((n for n, s in sources.items() if s.get("type") in ("docker", "kubernetes")), None)
+                if not runtime:
+                    raise ValueError(f"container check '{c.name}' needs a docker: section, or a docker or kubernetes source")
+                c.source = runtime
             if c.threshold is None:  # reports 1+ (up) or 0 (down)
                 c.threshold, c.comparison = 1, "<"
         elif c.source not in sources:
@@ -209,6 +212,7 @@ def load_config(path: str | Path) -> Config:
                                         "filters": {"label": [f"com.docker.compose.project={docker['project']}"]}
                                         if docker.get("project") else {}}] if docker else []),
         docker=docker,
+        changes=raw.get("changes") or [],
         confirm_samples=max(1, int(watch.get("confirm_samples", 2))),
         event_grace_seconds=float(watch.get("event_grace_seconds", 8)),
         interval_seconds=int(watch.get("interval_seconds", 30)),

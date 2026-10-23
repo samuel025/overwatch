@@ -25,6 +25,7 @@ from .llm import LLM
 from .memory import build_memory
 from .models import Anomaly, Evidence, Incident, now_iso
 from .notifiers import build_notifiers
+from .changefeeds import build_feeds
 from .sources import build_sources
 from .store import IncidentStore
 
@@ -64,6 +65,8 @@ class Overwatch:
         self.listeners = [
             LISTENER_TYPES[e["type"]](e, self.on_container_event) for e in cfg.events if e.get("type") in LISTENER_TYPES
         ]
+        self.listeners += build_feeds(cfg.changes, self._record_feed_change, self.sources,
+                                      on_error=lambda msg: self.events.emit("source.error", message=msg))
         self._restore()
 
     def _with_builtin_sources(self, cfg: Config) -> dict[str, dict[str, Any]]:
@@ -83,6 +86,13 @@ class Overwatch:
                 "docker (built in, commands not SQL): `containers` (state, exit_code, oom_killed, restarts, limits), "
                 "`logs <service> [lines]`, `errors <service> [lines]`, `events [minutes]` (die/start/oom/kill)"
             )
+        if any(s.get("type") == "kubernetes" for s in sources.values()) and "kubernetes:" not in cfg.catalog:
+            notes.append(
+                "kubernetes (built in, commands not SQL): `pods` (phase, restarts, waiting_reason, last_exit_reason "
+                "e.g. OOMKilled, last_exit_code), `logs <service> [lines]`, `errors <service> [lines]`, "
+                "`events [minutes]` (BackOff, OOMKilling, Unhealthy, FailedScheduling), `rollouts` (wanted vs ready "
+                "replicas, image, generation)"
+            )
         if notes:
             cfg.catalog = (cfg.catalog.rstrip() + "\n" + "\n".join(notes)).strip()
         return sources
@@ -99,15 +109,27 @@ class Overwatch:
         if docker:
             defaults += [EvidenceConfig("containers_now", "Container state now", docker, "containers"),
                          EvidenceConfig("container_events", "Container events in the last 30 minutes", docker, "events 30")]
+        kube = next((n for n, s in cfg.sources.items() if s.get("type") == "kubernetes"), None)
+        if kube:
+            defaults += [EvidenceConfig("pods_now", "Pod state now (restarts, OOM kills, waiting reasons)", kube, "pods"),
+                         EvidenceConfig("kube_events", "Kubernetes events in the last 30 minutes", kube, "events 30"),
+                         EvidenceConfig("rollouts_now", "Deployments: replicas wanted vs ready, image", kube, "rollouts")]
         cfg.evidence = evidence + [d for d in defaults if d.name not in names]
         return cfg.evidence
 
     def record_change(self, service: str, version: str = "", kind: str = "deploy", author: str = "",
-                      description: str = "", ts: str | None = None) -> dict:
+                      description: str = "", ts: str | None = None, ref: str | None = None) -> dict:
         """A release or config change reported to Overwatch (CLI `overwatch change` or POST /api/changes)."""
-        row = self.store.record_change(service, version, kind, author, description, ts)
-        self.events.emit("change.recorded", **row)
-        return row
+        row = self.store.record_change(service, version, kind, author, description, ts, ref)
+        if row is not None:
+            self.events.emit("change.recorded", **{k: v for k, v in row.items() if k != "ref"})
+        return row or {}
+
+    def _record_feed_change(self, change: dict[str, Any]) -> bool:
+        """Callback for change feeds: True when the change was new."""
+        return bool(self.record_change(change["service"], change.get("version", ""), change.get("kind", "deploy"),
+                                       change.get("author", ""), change.get("description", ""), change.get("ts"),
+                                       change.get("ref")))
 
     def start_listeners(self) -> None:
         for listener in self.listeners:
@@ -380,6 +402,9 @@ class Overwatch:
 
     def stop(self) -> None:
         self._stop.set()
+        for listener in self.listeners:
+            if hasattr(listener, "stop"):
+                listener.stop()
         self.pool.shutdown(wait=False, cancel_futures=True)
 
     # -- state --------------------------------------------------------------------

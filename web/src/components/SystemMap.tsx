@@ -3,10 +3,10 @@ import { nodeHealth, STATE_LABEL, type NodeHealth } from "../health";
 import { useStore } from "../store";
 import type { BlastRadius } from "../types";
 
-const W = 196; // node card
-const H = 84;
-const COL_GAP = 84;
-const ROW_GAP = 22;
+const W = 172; // node card
+const H = 70;
+const COL_GAP = 72;
+const ROW_GAP = 16;
 
 /** Columns by call depth: entry points on the left, what they depend on to the right. */
 function layout(topology: Record<string, string[]>) {

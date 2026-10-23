@@ -15,7 +15,10 @@ from typing import Any
 
 import yaml
 
+from ..datalayer import source_config
 from .docker import discover_docker
+from .kubernetes import discover_kubernetes
+from .loki import discover_loki
 from .externals import merge_suggestions
 from .prometheus import discover_prometheus
 from .sql import discover_sql, sqlalchemy_url
@@ -26,12 +29,18 @@ def _env_name(source: str) -> str:
 
 
 def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
-             databases: dict[str, str] | None = None) -> dict[str, Any]:
-    """docker: {"project": ..., "service_label": ..., "socket": ...} or None to skip."""
+             databases: dict[str, str] | None = None, zetaris: bool = False,
+             kubernetes: dict[str, Any] | None = None, loki: dict[str, Any] | None = None) -> dict[str, Any]:
+    """docker: {"project": ..., "service_label": ..., "socket": ...} or None to skip.
+
+    zetaris: this deployment's data layer is Zetaris, so databases are registered there and the generated
+    checks and evidence are Spark SQL over <name>.<table>, not direct connections.
+    kubernetes: {"url", "token", "namespace", "service_label"} (all optional in a cluster) or None to skip.
+    loki: {"url", "tenant", "token"} or None to skip."""
     plan: dict[str, Any] = {
         "system": {"name": "my-system", "description": ""}, "docker": {}, "services": {}, "runtime_facts": "",
         "sources": {}, "catalog": [], "topology": {}, "checks": [], "evidence": [], "notes": [], "errors": [],
-        "externals": [], "log_source": None,
+        "externals": [], "log_source": None, "databases": {},
     }
     env_hits: dict[str, dict[str, str]] = {}
     log_hits: dict[str, dict[str, int]] = {}
@@ -61,6 +70,42 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
         except Exception as e:
             plan["errors"].append(f"Docker: {e}")
 
+
+    if kubernetes is not None:
+        try:
+            k = discover_kubernetes(kubernetes.get("url", ""), kubernetes.get("token", ""),
+                                    kubernetes.get("namespace", ""), kubernetes.get("service_label", ""))
+            plan["sources"]["k8s"] = k["source"]
+            plan["kubernetes"] = {"namespace": k["namespace"]}
+            for svc, facts in k["services"].items():
+                plan["services"].setdefault(svc, facts)
+            for svc, deps in k["topology"].items():
+                plan["topology"].setdefault(svc, [])
+                plan["topology"][svc] += [d for d in deps if d not in plan["topology"][svc]]
+            plan["checks"] += k["checks"]
+            plan["runtime_facts"] = (plan["runtime_facts"] + "\n" if plan["runtime_facts"] else "") + k["runtime_facts"]
+            plan["notes"] += k["notes"]
+            env_hits.update(k["env_hits"])
+            for svc, hosts in k["log_hits"].items():
+                log_hits.setdefault(svc, {}).update(hosts)
+            internal |= set(k["internal"])
+            plan["log_source"] = plan["log_source"] or {"type": "kubernetes", "source": "k8s"}
+        except Exception as e:
+            plan["errors"].append(f"Kubernetes: {e}")
+
+    if loki is not None and loki.get("url"):
+        try:
+            lk = discover_loki(loki["url"], tenant=loki.get("tenant", ""), token=loki.get("token", ""))
+            plan["sources"]["loki"] = lk["source"]
+            plan["catalog"].append(lk["catalog"])
+            plan["checks"] += lk["checks"]
+            plan["evidence"] += lk["evidence"]
+            for svc in lk["services"]:
+                plan["services"].setdefault(svc, {"what": "TODO: describe what this service does"})
+            plan["log_source"] = plan["log_source"] or {"type": "loki", "source": "loki", "label": lk["label"]}
+        except Exception as e:
+            plan["errors"].append(f"Loki at {loki['url']}: {e}")
+
     if prometheus_url:
         try:
             p = discover_prometheus(prometheus_url)
@@ -75,9 +120,13 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
 
     for name, url in (databases or {}).items():
         try:
-            s = discover_sql(name, url)
-            plan["sources"][name] = {"type": "postgres" if s["dialect"] == "postgresql" else "sql",
-                                     "url": sqlalchemy_url(url)}
+            s = discover_sql(name, url, target="zetaris" if zetaris else "direct")
+            if zetaris:
+                plan["databases"][name] = sqlalchemy_url(url)  # registered with Zetaris; the secret goes to .env
+                plan["sources"]["zetaris"] = source_config()
+            else:
+                plan["sources"][name] = {"type": "postgres" if s["dialect"] == "postgresql" else "sql",
+                                         "url": sqlalchemy_url(url)}
             plan["catalog"].append(s["catalog"])
             plan["checks"] += s["checks"]
             plan["evidence"] += s["evidence"]
@@ -88,7 +137,8 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
                 for h, n in hosts.items():
                     log_hits.setdefault(svc, {})[h] = log_hits.get(svc, {}).get(h, 0) + n
             if s.get("logs") and (plan["log_source"] or {}).get("type") != "sql":
-                plan["log_source"] = {"type": "sql", "source": name, "dialect": s["dialect"], **s["logs"]}
+                plan["log_source"] = {"type": "sql", "source": "zetaris" if zetaris else name,
+                                      "dialect": "spark" if zetaris else s["dialect"], **s["logs"]}
         except Exception as e:
             plan["errors"].append(f"Database {name}: {str(e).splitlines()[0]}")
     internal |= set(plan["services"]) | {h for src in plan["sources"].values() for h in re.findall(r"@([^:/]+)", src.get("url", ""))}
@@ -141,14 +191,16 @@ def _apply_externals(plan: dict[str, Any]) -> tuple[dict[str, list[str]], dict[s
         services[name] = {
             "what": ext.get("what") or "external dependency (third party); we only see it through our services",
             "called_by": ", ".join(ext.get("callers", [])) or "unknown",
+            "external": "yes",
         }
         if url := str(ext.get("health_url", "")).strip():
             checks.append({"name": f"{_key(name)}_up", "kind": "probe", "service": name, "url": url,
                            "timeout_ms": 3000, "severity": "high", "description": f"{name} answered its health/status URL"})
         text = str(ext.get("log_text", "")).strip().replace("'", "")
         if text and log_source.get("type") == "sql":
-            pg = log_source.get("dialect") == "postgresql"
-            window = "now() - interval '2 minutes'" if pg else "datetime('now', '-2 minutes')"
+            dialect = log_source.get("dialect")
+            window = ("current_timestamp() - INTERVAL 2 MINUTES" if dialect == "spark" else
+                      "now() - interval '2 minutes'" if dialect == "postgresql" else "datetime('now', '-2 minutes')")
             checks.append({
                 "name": f"{_key(name)}_errors", "service": name, "source": log_source["source"],
                 "query": _lit(f"SELECT count(*) AS value FROM {log_source['table']}\n"
@@ -156,7 +208,15 @@ def _apply_externals(plan: dict[str, Any]) -> tuple[dict[str, list[str]], dict[s
                               f"  AND message LIKE '%{text}%' AND {log_source['ts']} > {window}"),
                 "threshold": 5, "severity": "high", "description": f"errors mentioning {name}, last 2 minutes",
             })
-        elif text and log_source.get("type") == "docker":
+        elif text and log_source.get("type") == "loki":
+            callers = ext.get("callers") or []
+            selector = f'{log_source["label"]}=~"{"|".join(callers)}"' if callers else f'{log_source["label"]}=~".+"'
+            checks.append({
+                "name": f"{_key(name)}_errors", "service": name, "source": log_source["source"],
+                "query": f'sum(count_over_time({{{selector}}} |= "{text}" [2m]))', "threshold": 5, "severity": "high",
+                "description": f"log lines mentioning {name}, last 2 minutes",
+            })
+        elif text and log_source.get("type") in ("docker", "kubernetes"):
             checks.append({
                 "name": f"{_key(name)}_errors", "service": name, "source": log_source["source"],
                 "query": f"count {','.join(ext.get('callers') or ['*'])} 2 {text}", "threshold": 5, "severity": "high",
@@ -165,18 +225,48 @@ def _apply_externals(plan: dict[str, Any]) -> tuple[dict[str, list[str]], dict[s
     return topology, services, checks
 
 
+_NOTIFIER_SECRETS = {("slack", "webhook_url"): "SLACK_WEBHOOK_URL", ("jira", "api_token"): "JIRA_API_TOKEN",
+                     ("webhook", "url"): "OW_WEBHOOK_URL"}
+
+
+def _notifiers(chosen: dict[str, dict[str, Any]], env: dict[str, str]) -> list[dict[str, Any]]:
+    """Slack / Jira / webhook from the setup page; secret fields go to .env."""
+    out = []
+    for kind in ("slack", "jira", "webhook"):
+        cfg = chosen.get(kind) or {}
+        if not cfg.get("enabled"):
+            continue
+        entry: dict[str, Any] = {"type": kind}
+        for field, value in cfg.items():
+            if field == "enabled" or field.endswith("_set") or not value:
+                continue
+            if var := _NOTIFIER_SECRETS.get((kind, field)):
+                env[var] = str(value)
+                value = f"${{{var}}}"
+            entry[field] = value
+        out.append(entry)
+    return out
+
+
 def render(plan: dict[str, Any], llm: dict[str, str] | None = None) -> tuple[str, dict[str, str]]:
     """YAML text for overwatch.yaml, and the secrets (env var -> value) that belong in .env."""
     env: dict[str, str] = {}
     sources = {}
     for name, src in plan["sources"].items():
-        if src.get("type") in ("postgres", "sql", "zetaris"):
+        if src.get("type") in ("postgres", "sql", "zetaris") and "url" in src:
             var = _env_name(name)
             env[var] = src["url"]
             sources[name] = {**src, "url": f"${{{var}}}"}
+        elif src.get("token") or src.get("bearer_token"):
+            field = "token" if src.get("token") else "bearer_token"
+            var = "OW_" + re.sub(r"[^A-Z0-9]", "_", name.upper()) + "_TOKEN"
+            env[var] = src[field]
+            sources[name] = {**src, field: f"${{{var}}}"}
         else:
             sources[name] = src
 
+    for name, url in (plan.get("databases") or {}).items():  # kept so the data layer can re-register them
+        env[_env_name(name)] = url
     llm = llm or {}
     if llm.get("api_key"):
         env["LLM_API_KEY"] = llm["api_key"]
@@ -211,17 +301,19 @@ def render(plan: dict[str, Any], llm: dict[str, str] | None = None) -> tuple[str
     if evidence:
         doc["evidence"] = evidence
     doc["checks"] = checks
-    doc["watch"] = {"interval_seconds": 10, "confirm_samples": 2}
+    settings = plan.get("settings") or {}
+    doc["watch"] = {"interval_seconds": 10, "confirm_samples": 2,
+                    **{k: int(v) for k, v in (settings.get("watch") or {}).items() if v not in (None, "")}}
     doc["llm"] = {
         "base_url": "${LLM_BASE_URL:-http://127.0.0.1:8088/v1}",
         "api_key": "${LLM_API_KEY}",
         "investigator_model": "${OVERWATCH_MODEL:-meterless/text.deep}",
         "triage_model": "${OVERWATCH_TRIAGE_MODEL:-meterless/text.fast}",
-        "max_steps": 8,
+        "max_steps": int((settings.get("ai") or {}).get("max_steps") or 8),
     }
     doc["memory"] = {"type": "hmem", "url": "${MEMORY_URL:-http://127.0.0.1:8099}"}
-    doc["approval"] = "manual"
-    doc["notifiers"] = [{"type": "console"}]
+    doc["approval"] = settings.get("approval") if settings.get("approval") in ("manual", "auto") else "manual"
+    doc["notifiers"] = [{"type": "console"}, *_notifiers(settings.get("notifiers") or {}, env)]
 
     header = (
         f"# Generated by Overwatch discovery on {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}.\n"

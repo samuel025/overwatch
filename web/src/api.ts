@@ -27,6 +27,7 @@ export interface SetupState {
   config_path: string;
   docker_available: boolean;
   docker_projects: string[];
+  kubernetes_in_cluster: boolean;
   ai_configured: boolean;
   ai_base_url: string;
   ai_model: string;
@@ -56,8 +57,66 @@ export interface Plan {
   notes: string[];
   errors: string[];
   externals: External[];
-  log_source: { type: "sql" | "docker"; source: string; table?: string } | null;
+  log_source: { type: "sql" | "docker" | "kubernetes" | "loki"; source: string; table?: string } | null;
+  settings?: { notifiers: Notifiers; watch: Partial<WatchSettings>; approval: "manual" | "auto"; ai?: { max_steps?: number } };
 }
+
+export interface Notifiers {
+  slack?: { enabled: boolean; webhook_url: string; webhook_url_set?: boolean };
+  jira?: { enabled: boolean; base_url: string; email: string; api_token: string; api_token_set?: boolean; project_key: string; issue_type?: string };
+  webhook?: { enabled: boolean; url: string; url_set?: boolean };
+}
+
+export interface WatchSettings {
+  interval_seconds: number;
+  confirm_samples: number;
+  cooldown_seconds: number;
+  merge_window_seconds: number;
+  resolve_after_seconds: number;
+  max_parallel_investigations: number;
+}
+
+export interface AiSettings {
+  base_url: string;
+  api_key: string;
+  api_key_set?: boolean;
+  model: string;
+  triage_model: string;
+  max_steps?: number;
+}
+
+export interface SettingsCheck {
+  name: string;
+  kind: string;
+  service: string;
+  description: string;
+  severity: string;
+  threshold: number | null;
+  comparison: string;
+  relative_factor: number | null;
+  enabled: boolean;
+}
+
+export interface Settings {
+  config_path: string;
+  system: { name: string; description: string };
+  services: { name: string; what: string; normal: string; runs_on: string }[];
+  externals: External[];
+  service_names: string[];
+  checks: SettingsCheck[];
+  sources: { name: string; type: string }[];
+  ai: AiSettings;
+  notifiers: Notifiers;
+  watch: WatchSettings;
+  approval: "manual" | "auto";
+}
+
+export const settingsApi = {
+  read: () => fetch("/api/settings").then(json<Settings>),
+  save: (body: Partial<Settings>) =>
+    fetch("/api/settings", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+      .then(json<{ ok: boolean; config: string; backup: string; secrets: string[] }>),
+};
 
 export interface External {
   name: string;
@@ -68,6 +127,7 @@ export interface External {
   enabled: boolean;
   suggested: boolean;
   what?: string;
+  original?: string;
 }
 
 const post = <T,>(path: string, body: unknown) =>

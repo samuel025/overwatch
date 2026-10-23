@@ -48,8 +48,6 @@ export function Header() {
         </span>
       </div>
 
-      <a className="header-link" href="#setup">Setup</a>
-
       <form className="report" onSubmit={submit}>
         <input
           value={symptom}
@@ -61,6 +59,16 @@ export function Header() {
           Investigate
         </button>
       </form>
+
+      <a className="btn header-settings" href="#settings" title="Services, external services, checks, AI provider, notifications">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" />
+          <circle cx="16" cy="6" r="2" />
+          <circle cx="10" cy="12" r="2" />
+          <circle cx="18" cy="18" r="2" />
+        </svg>
+        Settings
+      </a>
     </header>
   );
 }

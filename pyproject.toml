@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+zetaris = ["jaydebeapi>=1.2"]
 
 [project.scripts]
 overwatch = "overwatch.cli:main"

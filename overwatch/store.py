@@ -25,17 +25,23 @@ class IncidentStore:
             "CREATE TABLE IF NOT EXISTS changes (ts TEXT NOT NULL, service TEXT NOT NULL, version TEXT, "
             "kind TEXT NOT NULL DEFAULT 'deploy', author TEXT, description TEXT)"
         )
+        if "ref" not in {r[1] for r in self._db.execute("PRAGMA table_info(changes)")}:
+            self._db.execute("ALTER TABLE changes ADD COLUMN ref TEXT")  # older state files: add the de-dup key
+        self._db.execute("CREATE INDEX IF NOT EXISTS changes_ref ON changes (ref)")
         self._db.commit()
 
     def record_change(self, service: str, version: str = "", kind: str = "deploy", author: str = "",
-                      description: str = "", ts: str | None = None) -> dict:
+                      description: str = "", ts: str | None = None, ref: str | None = None) -> dict | None:
+        """Add a change. With a `ref` (e.g. "github:org/repo:release:42") a change is stored once; None if seen."""
         from datetime import datetime, timezone
 
         row = {"ts": ts or datetime.now(timezone.utc).isoformat(timespec="seconds"), "service": service,
-               "version": version, "kind": kind, "author": author, "description": description}
+               "version": version, "kind": kind, "author": author, "description": description, "ref": ref}
         with self._lock:
-            self._db.execute("INSERT INTO changes (ts, service, version, kind, author, description) "
-                             "VALUES (:ts, :service, :version, :kind, :author, :description)", row)
+            if ref and self._db.execute("SELECT 1 FROM changes WHERE ref = ?", (ref,)).fetchone():
+                return None
+            self._db.execute("INSERT INTO changes (ts, service, version, kind, author, description, ref) "
+                             "VALUES (:ts, :service, :version, :kind, :author, :description, :ref)", row)
             self._db.commit()
         return row
 

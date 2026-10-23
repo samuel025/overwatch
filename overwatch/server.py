@@ -52,6 +52,20 @@ class DockerIn(BaseModel):
     service_label: str = ""
 
 
+class KubernetesIn(BaseModel):
+    enabled: bool = False
+    url: str = ""
+    token: str = ""
+    namespace: str = ""
+    service_label: str = ""
+
+
+class LokiIn(BaseModel):
+    url: str = ""
+    tenant: str = ""
+    token: str = ""
+
+
 class DatabaseIn(BaseModel):
     name: str
     url: str
@@ -61,6 +75,8 @@ class DiscoverIn(BaseModel):
     docker: DockerIn = Field(default_factory=DockerIn)
     prometheus_url: str = ""
     databases: list[DatabaseIn] = Field(default_factory=list)
+    kubernetes: KubernetesIn = Field(default_factory=KubernetesIn)
+    loki: LokiIn = Field(default_factory=LokiIn)
 
 
 class AiIn(BaseModel):
@@ -155,6 +171,7 @@ def create_app(ow: Overwatch | None, watch: bool = True, token: str | None = Non
             "config_path": str(rt.config_path.resolve()),
             "docker_available": available,
             "docker_projects": docker.projects() if available else [],
+            "kubernetes_in_cluster": Path("/var/run/secrets/kubernetes.io/serviceaccount/token").exists(),
             "ai_configured": bool(os.environ.get("LLM_BASE_URL") or os.environ.get("LLM_API_KEY")),
             "ai_base_url": os.environ.get("LLM_BASE_URL", ""),
             "ai_model": os.environ.get("OVERWATCH_MODEL", ""),
@@ -168,8 +185,13 @@ def create_app(ow: Overwatch | None, watch: bool = True, token: str | None = Non
             {"project": body.docker.project, "service_label": body.docker.service_label}
             if body.docker.enabled else None
         )
+        from .datalayer import zetaris_env
+
         plan = discover(docker, body.prometheus_url.strip(), {d.name.strip(): d.url.strip() for d in body.databases
-                                                            if d.name.strip() and d.url.strip()})
+                                                            if d.name.strip() and d.url.strip()},
+                        zetaris=bool(zetaris_env()),
+                        kubernetes=body.kubernetes.model_dump() if body.kubernetes.enabled else None,
+                        loki=body.loki.model_dump() if body.loki.url.strip() else None)
         text, _ = render(plan)
         return {"plan": plan, "yaml": text}
 
@@ -192,7 +214,15 @@ def create_app(ow: Overwatch | None, watch: bool = True, token: str | None = Non
         from .config import load_config
         from .discovery import write
 
+        from .datalayer import register
+
         ai = {k: v for k, v in body.ai.model_dump().items() if v}
+        registered: list[str] = []
+        if body.plan.get("databases"):  # data layer is Zetaris: register what the user connected, then write
+            try:
+                registered = register(body.plan["databases"])
+            except Exception as e:
+                raise HTTPException(400, f"Could not register your databases with the data layer: {e}")
         result = write(body.plan, rt.config_path, ai)
         for key, value in {"LLM_BASE_URL": ai.get("base_url"), "LLM_API_KEY": ai.get("api_key"),
                            "OVERWATCH_MODEL": ai.get("model"), "OVERWATCH_TRIAGE_MODEL": ai.get("triage_model")}.items():
@@ -202,6 +232,32 @@ def create_app(ow: Overwatch | None, watch: bool = True, token: str | None = Non
             rt.switch(Overwatch(load_config(rt.config_path)))
         except Exception as e:
             raise HTTPException(400, f"The configuration was written to {result['config']} but could not start: {e}")
+        return {"ok": True, "registered": registered, **result}
+
+    @app.get("/api/settings")
+    def settings_read() -> dict:
+        from . import settings
+
+        rt.require()
+        return settings.read(rt.config_path)
+
+    @app.put("/api/settings")
+    def settings_save(body: dict) -> dict:
+        from . import settings
+        from .config import load_config
+
+        rt.require()
+        with rt.lock:  # one edit at a time
+            try:
+                result = settings.save(rt.config_path, body)
+            except (ValueError, TypeError, KeyError) as e:
+                raise HTTPException(400, f"Not saved: {e}")
+        try:
+            new = Overwatch(load_config(rt.config_path))
+        except Exception as e:
+            Path(result["backup"]).replace(rt.config_path)  # put the working config back
+            raise HTTPException(400, f"Not saved: {e}")
+        rt.switch(new)
         return {"ok": True, **result}
 
     # -- console -----------------------------------------------------------------------------

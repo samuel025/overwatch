@@ -130,12 +130,12 @@ flowchart LR
 
 | Technology | Requirement | How Overwatch uses it | Where to see it |
 |---|---|---|---|
-| **Zetaris** | Data layer | The intended single place the agents read from: one SQL endpoint that federates metrics, logs, deploy history, tickets and database stats from separate systems, so the Investigator can join across them in one query. Configured as `type: zetaris`. | `sources:` in `overwatch.yaml`; the console header (*Data*) |
+| **Zetaris** | Data layer | Overwatch's own data layer, not something its users configure. When a user connects a database in the setup page, Overwatch registers it as a Zetaris datasource (`CREATE DATASOURCE … / REGISTER DATASOURCE TABLES …`) and the agents then query only Zetaris (`<datasource>.<table>`, Spark SQL), so one query can join tables from different systems. The Zetaris endpoint comes from the deployment's environment (`ZETARIS_JDBC_URL` …). See [The data layer](#the-data-layer). | `overwatch/datalayer.py`, `overwatch/sources/zetaris.py`; the console header (*Data*) |
 | **Meterless H-MEM** (engine, "Build") | At least one engine in a working feature | Incident memory. Confirmed incidents are stored in the long-term tier with provenance (`source`) and confidence; human approval/dismissal becomes `helpful` / `not_helpful` feedback that changes confidence; every change is written to the trust ledger (`ledger.jsonl`). **Official conformance suite: 13/13 passing.** | `memory-service/`, [`eval/hmem-conformance.md`](eval/hmem-conformance.md), the console's *Under the hood → Memory* |
 | **Meterless Nightshift** (provider, "Power") | Primary AI provider | Every model call goes through one OpenAI-compatible client (`overwatch/llm.py`) pointed at Nightshift's local endpoint, with the `meterless-app` / `meterless-scope` headers and the bearer token from Nightshift's `proxy-token` file. Each call is logged to `traces/llm_calls.jsonl`. | `.env` (`LLM_BASE_URL`), the console's *Under the hood → AI calls* |
 | **NVIDIA Nemotron** | Model (NVIDIA award) | Powers the Investigator's reasoning. Connected as a provider inside Nightshift; during development it can also be called directly at `integrate.api.nvidia.com`. Tested with `nvidia/nemotron-3-ultra-550b-a55b`. | The console header (*AI*) |
 
-> **Status, honestly:** the demo currently reads two Postgres databases directly (Zetaris not yet installed), and the Investigator has been tested against NVIDIA's API directly because Nightshift has no Linux edition. Switching to Nightshift is a two-line change in `.env` (see [Using Nightshift from another machine](#using-nightshift-from-another-machine)). Switching to Zetaris is replacing the two `sources` with one.
+> **Status, honestly:** the Zetaris integration is written from Zetaris's documentation and unit-tested against a fake JDBC connection, but **has not yet been run against a real Zetaris install**. Until it is, the demo reads two Postgres databases directly (the `direct` backend). The Investigator has been tested against NVIDIA's API directly because Nightshift has no Linux edition. Switching to Nightshift is a two-line change in `.env` (see [Using Nightshift from another machine](#using-nightshift-from-another-machine)). Switching to Zetaris is setting the `ZETARIS_*` variables and re-running setup.
 
 ---
 
@@ -262,13 +262,13 @@ Overwatch does not plug into your services. It reads the data they already produ
 | Data | Lets Overwatch… | Typical home |
 |---|---|---|
 | Per-service metrics (latency, errors, request rate) | detect problems; see which service is slow or failing | Prometheus, a metrics table |
-| Application logs | read the actual error messages | Elasticsearch/Loki (via Zetaris), a logs table |
+| Application logs | read the actual error messages | Docker or Kubernetes logs, Loki, a logs table |
 | Deploy and config change history | connect a problem to the change that caused it | CI/CD, a `deploys` table |
 | Database statistics (`pg_stat_activity`, `pg_stat_statements`, `pg_locks`, `pg_indexes`) | find slow queries, locks, missing indexes, connection problems | the database itself |
 | Container/host metrics (CPU, memory, restarts, OOM kills, running state) | find leaks, crashes, saturation; know if a service is alive | Kubernetes/cAdvisor, Docker |
 | Past incident tickets | give the Historian something to remember | Jira export |
 
-The more of this you connect, the better the investigations. Through **Zetaris** you can expose all of it as one SQL source.
+The more of this you connect, the better the investigations. You do not need a logs table or a metrics table: Docker, Kubernetes and Loki are read directly from their own APIs.
 
 ### Connecting: three ways
 
@@ -303,6 +303,8 @@ overwatch run
 | From | It discovers |
 |---|---|
 | **Docker / Docker Compose** | services (replicas grouped as one), **who calls whom** (Compose's `depends_on` labels), CPU and memory limits, restart policy, **health endpoints** (tries `/health`, `/healthz`, `/ready`, `/status` on published ports), and a liveness check per service |
+| **Kubernetes** | services from pod labels, dependencies from environment values that name another service, readiness probes, a liveness check per service, hostnames of external services in env and error logs |
+| **Loki** | services from its labels, an error-rate check per service (alerts at 4x its own normal), an error-volume evidence query |
 | **SQL databases / Zetaris** | every table and column for the catalog; a **change log** (columns like `service` + `version` + a timestamp), **logs** (`level` + `message`) and **metrics** tables (`service` + latency/error columns), turned into per-service latency and error checks; the database's own health views (`pg_stat_activity`, `pg_stat_statements`...) |
 | **Prometheus** | standard request metrics (`http_requests_total`, `http_request_duration_seconds`, OpenTelemetry names) and `up`, turned into per-service latency, error-rate and liveness checks |
 
@@ -324,6 +326,15 @@ Each one is suggested with the evidence ("payments has it in the PROVIDER_URL se
 In the demo shop, payments reaches the card processor through `PROVIDER_URL=http://psp.example.com:8000/psp`, so discovery finds `psp.example.com` on its own.
 
 Discovery still cannot know what each service is *for*: fill in the one-line descriptions. Kubernetes discovery is not supported yet.
+
+### The data layer
+
+Overwatch reads everything through one data layer with two backends:
+
+- **`direct`** (today's default): every connected database is its own source.
+- **`zetaris`**: set when the deployment's environment has `ZETARIS_JDBC_URL`. The setup page is unchanged for the user, but when they save, Overwatch registers each database they connected in Zetaris (`CREATE DATASOURCE … OPTIONS (jdbcurl …)` then `REGISTER DATASOURCE TABLES FROM …`), writes the generated checks and evidence as Spark SQL over `<datasource>.<table>`, and the agents query only Zetaris. The user's database address is kept in `.env` (`OW_<NAME>_URL`) so it can be registered again.
+
+Zetaris is reached over JDBC with Zetaris's own driver (Java and `pip install overwatch[zetaris]`). Only Overwatch's setup flow can run registration statements; the agents can only run `SELECT`, `WITH`, `SHOW` and `DESCRIBE`. Docker, Kubernetes and Loki stay direct sources next to it.
 
 ### Built in, no setup needed
 
@@ -398,9 +409,13 @@ Passed to the Investigator as facts. These two sections prevent the most common 
 
 ```yaml
 sources:
-  zetaris:
-    type: zetaris                # same SQL adapter, named for clarity
-    url: ${ZETARIS_URL}          # SQLAlchemy URL of the Zetaris SQL endpoint
+  zetaris:                       # the data layer; written by setup from the deployment's environment
+    type: zetaris
+    jdbc_url: ${ZETARIS_JDBC_URL}
+    driver_class: ${ZETARIS_DRIVER_CLASS}   # the class of the Zetaris JDBC driver you downloaded
+    driver_jar: ${ZETARIS_DRIVER_JAR}
+    username: ${ZETARIS_USER}
+    password: ${ZETARIS_PASSWORD}
   appdb:
     type: postgres               # or "sql" for any SQLAlchemy database (MySQL, Snowflake, ...)
     url: postgresql+psycopg://readonly:${DB_PASSWORD}@db:5432/app
@@ -410,7 +425,19 @@ sources:
     type: prometheus             # Prometheus or compatible (VictoriaMetrics, Mimir, Thanos)
     url: http://prometheus:9090
     bearer_token: ${PROM_TOKEN}  # optional
+  logs:
+    type: loki                   # application logs, queried with LogQL
+    url: http://loki:3100
+    tenant: team-a               # optional (X-Scope-OrgID)
+    since_minutes: 15            # window for log-line queries
+  cluster:
+    type: kubernetes             # pods, logs, events, rollouts straight from the API server
+    namespace: shop              # inside a cluster, the pod's service account and namespace are used
+    # outside a cluster:  url: https://api.example.com:6443   token: ${K8S_TOKEN}
+    service_label: app           # label naming a service (default: app.kubernetes.io/name, then app)
 ```
+
+Kubernetes needs a service account that can `get`/`list` pods, `pods/log`, events and deployments in the namespace. Its commands are `pods`, `logs <service>`, `errors <service>`, `events [minutes]`, `rollouts` and `count <service|*> <minutes> <text>`, and `kind: container` checks work against it exactly as against Docker.
 
 Two sources are always available without configuration: `overwatch` (the built-in change log, SQLite, read-only) and, with a `docker:` section, `docker`.
 
@@ -482,6 +509,27 @@ evidence:
 ```
 
 Run in parallel the moment an incident opens (well under a second) and handed to the Investigator, so it starts from the basics instead of spending its first steps fetching them. Timestamped rows are labelled with `minutes_before_start`. Recent changes from the built-in change log, and container state/events (with `docker:`), are always included.
+
+### `changes`: learn about deploys without being told
+
+Instead of asking CI to push every release to `/api/changes`, Overwatch can poll where changes already happen. Each change is stored once, with the time it really happened, in the same change log the Investigator reads ("what changed just before this?").
+
+```yaml
+changes:
+  - type: github                 # releases, GitHub deployments and, optionally, successful deploy workflow runs
+    repo: acme/payments
+    token: ${GITHUB_TOKEN}       # read access to the repo; stays in .env
+    service: payments            # which service a change belongs to (default: the repo name)
+    events: [releases, deployments, workflow_runs]   # default: releases and deployments
+    environment: production      # optional: only deployments to this environment
+    workflow: deploy.yml         # for workflow_runs
+    branch: main                 # optional
+    interval_seconds: 60         # default 60
+    lookback_minutes: 120        # ignore changes older than this (default 120)
+  - type: kubernetes             # a Deployment whose image changed is a deploy; a spec change is a config change
+```
+
+Discovery adds the `kubernetes` feed automatically when it finds a cluster. A feed that fails (bad token, GitHub down) shows up as an error event and never affects watching. One repository maps to one service, so a monorepo needs one entry per service.
 
 ### `events`: pushed event streams
 
@@ -588,7 +636,8 @@ state_path: ""                       # SQLite incident store; default <trace_dir
 | `OW_<SOURCE>_URL` | Database addresses written by discovery |
 | `MEMORY_URL`, `MEMORY_TOKEN` | H-MEM service |
 | `OVERWATCH_TOKEN` | Console/API token |
-| `ZETARIS_URL` | Zetaris SQL endpoint (SQLAlchemy URL) |
+| `ZETARIS_JDBC_URL`, `ZETARIS_DRIVER_CLASS`, `ZETARIS_DRIVER_JAR`, `ZETARIS_USER`, `ZETARIS_PASSWORD` | The deployment's Zetaris workspace (the data layer); end users never set these |
+| `GITHUB_TOKEN` | Change feed (`changes:`), read access to the repo |
 | `SLACK_WEBHOOK_URL`, `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | Notifiers |
 | `HMEM_DIR`, `PORT`, `HOST`, `MEMORY_TOKEN` | Memory service (`memory-service/`) |
 
@@ -774,7 +823,7 @@ Run them with the project's Python (`../../../.venv/bin/python` from `scripts/`)
 ### Automated tests
 
 ```bash
-pytest                                       # 93 offline tests: no database, AI or memory service needed
+pytest                                       # 115 offline tests: no database, AI or memory service needed
 cd memory-service && npm run conformance     # official H-MEM conformance suite
 ```
 
@@ -894,7 +943,8 @@ Register it in `SOURCE_TYPES` in `overwatch/sources/__init__.py`.
 
 - **AI accuracy is not yet benchmarked.** Detection is verified for every fault; diagnosis has only been spot-checked. The model's confidence is self-reported, not calibrated.
 - **Memory recall is weak.** The Historian searches with text built from alert names, which rarely matches the wording of past tickets, so H-MEM often returns nothing even for a known problem. The H-MEM reference also uses a hash-based embedder and JSON-file storage; Meterless itself describes it as not a production library.
-- **Direct connectors:** SQL databases and Prometheus only. Elasticsearch/Loki, Datadog, CloudWatch and Kubernetes events need to come through Zetaris or a database.
+- **Connectors:** SQL databases, Prometheus, Docker, Kubernetes and Loki. The Kubernetes and Loki sources and their discovery are tested against recorded API responses, not a live cluster. Elasticsearch, Datadog and CloudWatch are not covered yet.  Both are found by discovery and the setup page (Kubernetes: services from labels, dependencies from environment values that name another service, a liveness check per service; Loki: services from its labels, an error-rate check per service).
+- **Zetaris is unverified end to end:** the JDBC source, registration statements and Spark SQL generation follow Zetaris's documentation and are tested against a fake connection only.
 - **No distributed tracing** (e.g. OpenTelemetry); the Investigator reasons from aggregates and logs.
 - **History in memory:** relative baselines cover ~30 minutes and restart with the process.
 - **Single process**, no high availability; no Docker image or CI pipeline yet.
@@ -905,7 +955,7 @@ Register it in `SOURCE_TYPES` in `overwatch/sources/__init__.py`.
 
 1. Run the full benchmark (memory on/off) and publish the table.
 2. Improve recall: richer symptom text (service, error messages, recent changes) and a real embedding model.
-3. Connect through Zetaris and Nightshift for the demo.
+3. Install Zetaris, run the fault suite through it, and record the result; connect through Nightshift for the demo.
 4. Markovian engine for long investigations (bounded context per step); Scout Intent to guard against injected instructions in logs.
 5. Persist check history; Docker image; CI; more connectors.
 

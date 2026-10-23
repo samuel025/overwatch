@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { connect, refreshMemory, setupApi, type SetupState } from "./api";
+import { Settings } from "./components/Settings";
 import { Setup } from "./components/Setup";
 import { Header } from "./components/Header";
 import { IncidentView } from "./components/IncidentView";
@@ -10,6 +11,12 @@ import { MapLegend, SystemMap } from "./components/SystemMap";
 import { focusIncident } from "./health";
 import { useStore } from "./store";
 import type { BlastRadius, OwEvent } from "./types";
+
+/** #settings[/section] edits the running config; #setup runs discovery again. */
+function route(): "console" | "settings" | "setup" {
+  const h = window.location.hash;
+  return h.startsWith("#settings") ? "settings" : h === "#setup" ? "setup" : "console";
+}
 
 let live = false; // replayed backlog should not toast; only events after the first live tick
 
@@ -39,27 +46,36 @@ function onEvent(e: OwEvent) {
 
 export default function App() {
   const [setup, setSetup] = useState<SetupState | null>(null);
-  const [showSetup, setShowSetup] = useState(window.location.hash === "#setup");
+  const [page, setPage] = useState(route);
 
   useEffect(() => {
     setupApi.state().then(setSetup).catch(() => setSetup(null));
-    const onHash = () => setShowSetup(window.location.hash === "#setup");
+    const onHash = () => setPage(route());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  if (setup && (!setup.configured || showSetup)) {
+  if (!setup) return <div className="app" />;
+  const toConsole = () => {
+    window.history.replaceState(null, "", window.location.pathname);
+    setPage("console");
+  };
+  if (!setup.configured || page === "setup") {
     return (
       <div className="app">
-        <Setup
-          state={setup}
-          onCancel={setup.configured ? () => { window.location.hash = ""; setShowSetup(false); } : undefined}
-        />
+        <Setup state={setup} onCancel={setup.configured ? toConsole : undefined} />
         <Toaster theme="dark" position="bottom-right" />
       </div>
     );
   }
-  if (!setup) return <div className="app" />;
+  if (page === "settings") {
+    return (
+      <div className="app">
+        <Settings onClose={toConsole} />
+        <Toaster theme="dark" position="bottom-right" />
+      </div>
+    );
+  }
   return <Console />;
 }
 

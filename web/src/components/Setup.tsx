@@ -1,36 +1,39 @@
 import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { toast } from "sonner";
-import { setupApi, type External, type Plan, type SetupState } from "../api";
+import { setupApi, type AiSettings, type Notifiers, type Plan, type SetupState, type WatchSettings } from "../api";
+import { AiEditor, ExternalsEditor, Field, NotificationsEditor, Section, Switch, WatchEditor } from "./SettingsParts";
 import { SystemMap } from "./SystemMap";
 
-type Step = "connect" | "review" | "saving";
+const STEPS = [
+  { id: "connect", label: "Connect", hint: "Where things run" },
+  { id: "system", label: "Review system", hint: "Services and external APIs" },
+  { id: "watch", label: "Checks & alerts", hint: "What to watch, who to tell" },
+] as const;
+type Step = (typeof STEPS)[number]["id"];
 
-const AI_PRESETS = {
-  nightshift: { label: "Meterless Nightshift", base_url: "http://127.0.0.1:8088/v1", model: "meterless/text.deep", triage_model: "meterless/text.fast" },
-  nvidia: { label: "NVIDIA (direct)", base_url: "https://integrate.api.nvidia.com/v1", model: "nvidia/nemotron-3-ultra-550b-a55b", triage_model: "nvidia/nemotron-3.5-lightning-30b-a3b" },
+const DEFAULT_WATCH: WatchSettings = {
+  interval_seconds: 10, confirm_samples: 2, cooldown_seconds: 600, merge_window_seconds: 300,
+  resolve_after_seconds: 60, max_parallel_investigations: 2,
 };
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <label className="field">
-      <span className="field-label">{label}</span>
-      {children}
-      {hint && <span className="field-hint">{hint}</span>}
-    </label>
-  );
-}
-
+/** First-run wizard (and "run discovery again"): connect → review what was found → choose checks and alerts. */
 export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () => void }) {
   const [step, setStep] = useState<Step>("connect");
   const [useDocker, setUseDocker] = useState(state.docker_available);
   const [project, setProject] = useState(state.docker_projects[0] ?? "");
   const [serviceLabel, setServiceLabel] = useState("");
+  const [useK8s, setUseK8s] = useState(state.kubernetes_in_cluster);
+  const [k8s, setK8s] = useState({ url: "", token: "", namespace: "", service_label: "" });
+  const [loki, setLoki] = useState({ url: "", tenant: "", token: "" });
   const [prometheus, setPrometheus] = useState("");
   const [databases, setDatabases] = useState<{ name: string; url: string }[]>([{ name: "", url: "" }]);
-  const [ai, setAi] = useState({ base_url: state.ai_base_url, api_key: "", model: state.ai_model, triage_model: "" });
-  const [aiTest, setAiTest] = useState<{ ok: boolean; text: string } | null>(null);
+  const [ai, setAi] = useState<AiSettings>({ base_url: state.ai_base_url, api_key: "", api_key_set: state.ai_configured, model: state.ai_model, triage_model: "", max_steps: 8 });
+  const [notifiers, setNotifiers] = useState<Notifiers>({});
+  const [watch, setWatch] = useState<Partial<WatchSettings>>(DEFAULT_WATCH);
+  const [approval, setApproval] = useState<"manual" | "auto">("manual");
   const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [yaml, setYaml] = useState("");
 
@@ -45,11 +48,13 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
         docker: { enabled: useDocker, project, service_label: serviceLabel },
         prometheus_url: prometheus,
         databases: databases.filter((d) => d.name && d.url),
+        kubernetes: { enabled: useK8s, ...k8s },
+        loki,
       });
       setPlan(res.plan);
       setYaml(res.yaml);
       if (res.plan.errors.length && !res.plan.checks.length) toast.error("Nothing could be discovered", { description: res.plan.errors.join("\n") });
-      else setStep("review");
+      else setStep("system");
     } catch (e) {
       toast.error("Discovery failed", { description: String(e) });
     } finally {
@@ -57,32 +62,21 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
     }
   }
 
-  async function testAi() {
-    setAiTest(null);
-    const res = await setupApi.testAi(ai);
-    if (!res.ok) return setAiTest({ ok: false, text: res.error ?? "failed" });
-    const has = !ai.model || res.models?.includes(ai.model);
-    setAiTest({ ok: true, text: `Connected · ${res.models?.length ?? 0} models${ai.model && !has ? ` · "${ai.model}" not listed (it may still work)` : ""}` });
-  }
-
   async function save() {
     if (!plan) return;
-    setStep("saving");
+    setSaving(true);
     try {
-      const res = await setupApi.apply({ plan, ai });
-      toast.success("Overwatch is watching your system", { description: `Saved ${res.config}${res.backup ? ` (old config kept as ${res.backup})` : ""}` });
+      const res = await setupApi.apply({ plan: { ...plan, settings: { notifiers, watch, approval, ai: { max_steps: ai.max_steps } } }, ai });
+      toast.success("Overwatch is watching your system", { description: `Saved ${res.config}${res.backup ? ` (old config kept as ${res.backup.split("/").pop()})` : ""}` });
       window.setTimeout(() => window.location.assign("/"), 800);
     } catch (e) {
       toast.error("Could not start", { description: String(e) });
-      setStep("review");
+      setSaving(false);
     }
   }
 
-  const updatePlan = (fn: (p: Plan) => Plan) => setPlan((p) => (p ? fn(structuredClone(p)) : p));
-  const todo = (v: string) => v.startsWith("TODO");
-  const setExternal = (i: number, patch: Partial<External>) =>
-    updatePlan((p) => { p.externals[i] = { ...p.externals[i], ...patch }; return p; });
-  // The map preview includes accepted external services.
+  const updatePlan = (fn: (p: Plan) => void) => setPlan((p) => { if (!p) return p; const n = structuredClone(p); fn(n); return n; });
+  const todo = (v: string) => v.startsWith("TODO") || v.endsWith("TODO: one or two sentences on what the system does and how requests flow.");
   const previewTopology = (() => {
     if (!plan) return {};
     const t: Record<string, string[]> = Object.fromEntries(Object.entries(plan.topology).map(([k, v]) => [k, [...v]]));
@@ -92,226 +86,215 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
     }
     return t;
   })();
+  const stepIndex = STEPS.findIndex((s) => s.id === step);
+  const canDiscover = useDocker || useK8s || !!loki.url || !!prometheus || databases.some((d) => d.url);
 
   return (
-    <div className="setup">
-      <header className="setup-head">
+    <div className="settings-shell setup">
+      <div className="settings-top">
         <div>
-          <h1>Connect your system</h1>
-          <p className="muted">
-            Tell Overwatch where things are. It discovers your services, how they connect, what to watch and what
-            data it can read, then writes <code>{state.config_path}</code> for you.
+          <h1>{state.configured ? "Run discovery again" : "Connect your system"}</h1>
+          <p className="muted small">
+            Overwatch finds your services, how they connect, what to watch and what data it can read, then writes <code>{state.config_path}</code>.
           </p>
         </div>
-        <ol className="steps">
-          <li className={clsx(step === "connect" && "on")}>1 · Connect</li>
-          <li className={clsx(step !== "connect" && "on")}>2 · Review</li>
-          <li className={clsx(step === "saving" && "on")}>3 · Start watching</li>
-        </ol>
-      </header>
+        {onCancel && <button type="button" className="btn" onClick={onCancel}>← Back to console</button>}
+      </div>
+
+      <ol className="stepper">
+        {STEPS.map((s, i) => (
+          <li key={s.id} className={clsx(i === stepIndex && "on", i < stepIndex && "done")}>
+            <button type="button" disabled={i > stepIndex || saving} onClick={() => setStep(s.id)}>
+              <span className="step-num">{i < stepIndex ? "✓" : i + 1}</span>
+              <span><b>{s.label}</b><span className="field-hint">{s.hint}</span></span>
+            </button>
+          </li>
+        ))}
+      </ol>
 
       {step === "connect" && (
-        <div className="setup-grid">
-          <section className="card">
-            <h2 className="card-title">Where your services run</h2>
-            <label className="toggle">
-              <input type="checkbox" checked={useDocker} onChange={(e) => setUseDocker(e.target.checked)} disabled={!state.docker_available} />
-              <span>
-                <b>Docker / Docker Compose</b>
-                <span className="field-hint">
-                  {state.docker_available
-                    ? `Detected on this machine · ${state.docker_projects.length} Compose project${state.docker_projects.length === 1 ? "" : "s"}`
-                    : "Docker is not reachable from Overwatch"}
-                </span>
-              </span>
-            </label>
+        <div className="s-stack">
+          <Section title="Where your services run" description="Gives Overwatch your services, who calls whom, liveness, health endpoints, logs and container events.">
+            <Switch checked={useDocker} onChange={setUseDocker} disabled={!state.docker_available} label="Docker / Docker Compose"
+              hint={state.docker_available
+                ? `Detected on this machine · ${state.docker_projects.length} Compose project${state.docker_projects.length === 1 ? "" : "s"}`
+                : "Docker is not reachable from Overwatch"} />
             {useDocker && (
-              <div className="field-row">
+              <div className="field-grid">
                 <Field label="Compose project">
                   <select value={project} onChange={(e) => setProject(e.target.value)}>
                     {state.docker_projects.map((p) => <option key={p}>{p}</option>)}
                   </select>
                 </Field>
-                <Field label="Service label (optional)" hint="Container label that names the service; default is the Compose service">
+                <Field label="Service label" hint="Optional. Container label naming the service; default is the Compose service.">
                   <input value={serviceLabel} onChange={(e) => setServiceLabel(e.target.value)} placeholder="com.docker.compose.service" />
                 </Field>
               </div>
             )}
-            <p className="field-hint">Gives Overwatch: your services, who calls whom, liveness, health endpoints, logs and container events.</p>
-          </section>
+          </Section>
 
-          <section className="card">
-            <h2 className="card-title">Metrics and data</h2>
-            <Field label="Prometheus (optional)" hint="Standard request metrics become latency and error checks automatically">
-              <input value={prometheus} onChange={(e) => setPrometheus(e.target.value)} placeholder="http://prometheus:9090" />
-            </Field>
-            <div className="field-label">Databases or Zetaris (optional)</div>
-            {databases.map((d, i) => (
-              <div key={i} className="db-row">
-                <input value={d.name} placeholder="name, e.g. zetaris" onChange={(e) => setDatabases(databases.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
-                <input value={d.url} placeholder="postgresql://readonly:password@host:5432/db" onChange={(e) => setDatabases(databases.map((x, j) => (j === i ? { ...x, url: e.target.value } : x)))} />
-                {databases.length > 1 && <button className="btn" onClick={() => setDatabases(databases.filter((_, j) => j !== i))} aria-label="Remove">×</button>}
+          <Section title="Kubernetes" description="Reads pods, restarts and OOM kills, logs, events and rollouts from the API server. Give it a service account that can get and list pods, pod logs, events and deployments.">
+            <Switch checked={useK8s} onChange={setUseK8s}
+              label="Kubernetes cluster"
+              hint={state.kubernetes_in_cluster ? "Overwatch is running inside a cluster; its service account is used" : "Overwatch is outside a cluster: give it the API server address and a token"} />
+            {useK8s && (
+              <div className="field-grid">
+                {!state.kubernetes_in_cluster && (
+                  <>
+                    <Field label="API server"><input value={k8s.url} onChange={(e) => setK8s({ ...k8s, url: e.target.value })} placeholder="https://my-cluster:6443" /></Field>
+                    <Field label="Token" hint="A service account token. Stored in .env.">
+                      <input type="password" autoComplete="off" value={k8s.token} onChange={(e) => setK8s({ ...k8s, token: e.target.value })} />
+                    </Field>
+                  </>
+                )}
+                <Field label="Namespace" hint="Optional. Defaults to the service account's namespace, or “default”.">
+                  <input value={k8s.namespace} onChange={(e) => setK8s({ ...k8s, namespace: e.target.value })} placeholder="shop" />
+                </Field>
+                <Field label="Service label" hint="Optional. Label naming a service; default app.kubernetes.io/name, then app.">
+                  <input value={k8s.service_label} onChange={(e) => setK8s({ ...k8s, service_label: e.target.value })} placeholder="app" />
+                </Field>
               </div>
-            ))}
-            <button className="btn btn-small-inline" onClick={() => setDatabases([...databases, { name: "", url: "" }])}>+ Add a database</button>
-            <p className="field-hint">Use a read-only user. Tables, change logs, logs, metrics tables and database health views are recognised automatically.</p>
-          </section>
+            )}
+          </Section>
 
-          <section className="card">
-            <h2 className="card-title">AI provider</h2>
-            <div className="preset-row">
-              {Object.entries(AI_PRESETS).map(([k, p]) => (
-                <button key={k} className="btn" onClick={() => setAi({ ...ai, base_url: p.base_url, model: p.model, triage_model: p.triage_model })}>{p.label}</button>
-              ))}
+          <Section title="Logs" description="Application logs, read straight from Loki. No log table needed; services are found from its labels.">
+            <div className="field-grid">
+              <Field label="Loki" wide hint="Optional. Becomes an error-rate check per service.">
+                <input value={loki.url} onChange={(e) => setLoki({ ...loki, url: e.target.value })} placeholder="http://loki:3100" />
+              </Field>
+              {loki.url && (
+                <>
+                  <Field label="Tenant" hint="Optional. For multi-tenant Loki."><input value={loki.tenant} onChange={(e) => setLoki({ ...loki, tenant: e.target.value })} /></Field>
+                  <Field label="Token" hint="Optional. Stored in .env."><input type="password" autoComplete="off" value={loki.token} onChange={(e) => setLoki({ ...loki, token: e.target.value })} /></Field>
+                </>
+              )}
             </div>
-            <div className="field-row">
-              <Field label="Address"><input value={ai.base_url} onChange={(e) => setAi({ ...ai, base_url: e.target.value })} placeholder="http://127.0.0.1:8088/v1" /></Field>
-              <Field label="Key or token" hint={state.ai_configured ? "Leave empty to keep the one already set" : "Nightshift: the proxy-token file"}>
-                <input type="password" value={ai.api_key} onChange={(e) => setAi({ ...ai, api_key: e.target.value })} autoComplete="off" />
+          </Section>
+
+          <Section title="Metrics and data" description="Use read-only credentials. Tables, change logs, logs, metrics tables and database health views are recognised automatically.">
+            <div className="field-grid">
+              <Field label="Prometheus" wide hint="Optional. Standard request metrics become latency and error checks.">
+                <input value={prometheus} onChange={(e) => setPrometheus(e.target.value)} placeholder="http://prometheus:9090" />
               </Field>
             </div>
-            <div className="field-row">
-              <Field label="Investigation model"><input value={ai.model} onChange={(e) => setAi({ ...ai, model: e.target.value })} placeholder="meterless/text.deep" /></Field>
-              <Field label="Fast first-guess model"><input value={ai.triage_model} onChange={(e) => setAi({ ...ai, triage_model: e.target.value })} placeholder="meterless/text.fast" /></Field>
-            </div>
-            <div className="test-row">
-              <button className="btn" onClick={testAi} disabled={!ai.base_url}>Test connection</button>
-              {aiTest && <span className={aiTest.ok ? "ok small" : "err small"}>{aiTest.ok ? "✓ " : "✕ "}{aiTest.text}</span>}
-            </div>
-          </section>
+            <div className="field-label">Databases or Zetaris</div>
+            {databases.map((d, i) => (
+              <div key={i} className="db-row">
+                <input aria-label="Database name" value={d.name} placeholder="name, e.g. zetaris" onChange={(e) => setDatabases(databases.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
+                <input aria-label="Connection URL" value={d.url} placeholder="postgresql://readonly:password@host:5432/db" onChange={(e) => setDatabases(databases.map((x, j) => (j === i ? { ...x, url: e.target.value } : x)))} />
+                {databases.length > 1 && <button type="button" className="btn btn-ghost" onClick={() => setDatabases(databases.filter((_, j) => j !== i))}>Remove</button>}
+              </div>
+            ))}
+            <button type="button" className="btn btn-dashed" onClick={() => setDatabases([...databases, { name: "", url: "" }])}>+ Add database</button>
+          </Section>
 
-          <div className="setup-actions">
-            {onCancel && <button className="btn" onClick={onCancel}>Back to the console</button>}
-            <button className="btn btn-primary" onClick={discover} disabled={busy || (!useDocker && !prometheus && !databases.some((d) => d.url))}>
-              {busy ? "Discovering…" : "Discover my system"}
+          <Section title="AI provider" description="Meterless Nightshift by default. Any OpenAI-compatible endpoint works.">
+            <AiEditor ai={ai} onChange={setAi} />
+          </Section>
+
+          <div className="wizard-actions">
+            <span className="field-hint">{canDiscover ? "Discovery only reads. Nothing is changed in your system." : "Choose at least one place to look."}</span>
+            <button type="button" className="btn btn-primary" onClick={discover} disabled={busy || !canDiscover}>
+              {busy ? "Discovering…" : "Discover my system →"}
             </button>
           </div>
         </div>
       )}
 
-      {step !== "connect" && plan && (
-        <div className="setup-grid">
+      {step === "system" && plan && (
+        <div className="s-stack">
           {(plan.errors.length > 0 || plan.notes.length > 0) && (
-            <section className="card">
-              {plan.errors.map((e) => <p key={e} className="err small">✕ {e}</p>)}
-              {plan.notes.map((n) => <p key={n} className="small muted">• {n}</p>)}
-            </section>
+            <div className="notice" role="status">
+              {plan.errors.map((e) => <p key={e} className="err">{e}</p>)}
+              {plan.notes.map((n) => <p key={n}>{n}</p>)}
+            </div>
           )}
 
-          <section className="card">
-            <div className="card-head">
-              <h2 className="card-title">Your system: {Object.keys(plan.services).length} services</h2>
-              <span className="small muted">Discovered from {[plan.docker.project && "Docker", ...Object.keys(plan.sources)].filter(Boolean).join(", ")}</span>
-            </div>
-            {Object.keys(previewTopology).length > 0 ? <SystemMap preview={previewTopology} /> : <p className="empty">No dependencies found; add a topology later if you like.</p>}
-          </section>
+          <Section title={`Your system · ${Object.keys(plan.services).length} services`}
+            description={`Discovered from ${[plan.docker.project && "Docker", ...Object.keys(plan.sources)].filter(Boolean).join(", ")}. Lines show who calls whom.`}>
+            {Object.keys(previewTopology).length > 0
+              ? <div className="s-preview"><SystemMap preview={previewTopology} /></div>
+              : <p className="empty-box">No dependencies found. You can add them to the configuration later.</p>}
+          </Section>
 
-          <section className="card">
-            <h2 className="card-title">External services</h2>
-            <p className="field-hint">
-              Third-party APIs and managed services your system calls. Docker cannot see them, so Overwatch looks for
-              their addresses in your services' settings and error logs (only the hostname is kept, never the setting's
-              value). Add any it missed.
-            </p>
-            {(plan.externals ?? []).length === 0 && <p className="empty">None found.</p>}
-            <ul className="external-list">
-              {(plan.externals ?? []).map((e, i) => (
-                <li key={i} className={clsx("external", !e.enabled && "external-off")}>
-                  <div className="external-top">
-                    <label className="toggle">
-                      <input type="checkbox" checked={e.enabled} onChange={(ev) => setExternal(i, { enabled: ev.target.checked })} />
-                      <input className="external-name" value={e.name} placeholder="api.example.com" onChange={(ev) => setExternal(i, { name: ev.target.value })} />
-                    </label>
-                    {e.suggested ? <span className="kind-chip">found automatically</span> : <span className="kind-chip">added by you</span>}
-                  </div>
-                  {e.evidence?.length > 0 && <p className="field-hint">{e.evidence.join(" · ")}</p>}
-                  <div className="field-label">Called by</div>
-                  <div className="caller-row">
-                    {Object.keys(plan.services).filter((s) => s !== e.name).map((s) => (
-                      <label key={s} className={clsx("caller", e.callers.includes(s) && "caller-on")}>
-                        <input type="checkbox" checked={e.callers.includes(s)}
-                          onChange={(ev) => setExternal(i, { callers: ev.target.checked ? [...e.callers, s] : e.callers.filter((c) => c !== s) })} />
-                        {s}
-                      </label>
-                    ))}
-                  </div>
-                  <div className="field-row">
-                    <Field label="Health or status URL (optional)" hint="Overwatch will call it to tell 'them' from 'us'">
-                      <input value={e.health_url} placeholder="https://status.example.com/api/v2/status.json" onChange={(ev) => setExternal(i, { health_url: ev.target.value })} />
-                    </Field>
-                    <Field label="Text in your error logs when it fails (optional)"
-                      hint={plan.log_source ? `Becomes a check on ${plan.log_source.type === "sql" ? plan.log_source.table : "container logs"}: more than 5 such errors in 2 minutes` : "No logs found to check"}>
-                      <input value={e.log_text} placeholder="e.g. the hostname, or a word from the error" onChange={(ev) => setExternal(i, { log_text: ev.target.value })} />
-                    </Field>
-                  </div>
-                </li>
-              ))}
-            </ul>
-            <button className="btn btn-small-inline"
-              onClick={() => updatePlan((p) => ({ ...p, externals: [...(p.externals ?? []), { name: "", callers: [], evidence: [], health_url: "", log_text: "", enabled: true, suggested: false }] }))}>
-              + Add an external service
-            </button>
-          </section>
+          <Section title="External services"
+            description="Third-party APIs your system calls. Docker can't see them, so Overwatch looks for their addresses in your services' settings and error logs (only the hostname is kept). Add any it missed.">
+            <ExternalsEditor externals={plan.externals ?? []} services={Object.keys(plan.services).filter((s) => !(plan.externals ?? []).some((e) => e.name === s))}
+              onChange={(next) => updatePlan((p) => { p.externals = next; })}
+              logHint={plan.log_source ? `Optional. Becomes a check on ${plan.log_source.type === "sql" ? plan.log_source.table : "container logs"}: more than 5 such errors in 2 minutes.` : "No logs were found to check."} />
+          </Section>
 
-          <section className="card">
-            <h2 className="card-title">Describe it in a sentence or two</h2>
-            <p className="field-hint">This is what an engineer would tell a newcomer. It helps the investigation most. Lines marked TODO are worth filling in.</p>
-            <Field label="The system">
-              <textarea rows={2} className={clsx(todo(plan.system.description.split(". ").pop() ?? "") && "todo")} value={plan.system.description}
-                onChange={(e) => updatePlan((p) => ({ ...p, system: { ...p.system, description: e.target.value } }))} />
-            </Field>
-            {Object.entries(plan.services).map(([name, facts]) => (
-              <Field key={name} label={name} hint={facts.runs_on}>
-                <input className={clsx(todo(facts.what ?? "") && "todo")} value={facts.what ?? ""}
-                  onChange={(e) => updatePlan((p) => ({ ...p, services: { ...p.services, [name]: { ...p.services[name], what: e.target.value } } }))} />
+          <Section title="Describe it" description="What an engineer would tell a newcomer. It helps the investigation more than anything else. Fields marked in amber still need you.">
+            <div className="field-grid">
+              <Field label="The system" wide>
+                <textarea rows={3} className={clsx(todo(plan.system.description) && "todo")} value={plan.system.description}
+                  onChange={(e) => updatePlan((p) => { p.system.description = e.target.value; })} />
               </Field>
-            ))}
-          </section>
+            </div>
+            <table className="s-table">
+              <thead><tr><th>Service</th><th>What it does</th></tr></thead>
+              <tbody>
+                {Object.entries(plan.services).map(([name, facts]) => (
+                  <tr key={name}>
+                    <td className="mono">{name}{facts.runs_on && <span className="field-hint">{facts.runs_on}</span>}</td>
+                    <td><input aria-label={`${name}: what it does`} className={clsx(todo(facts.what ?? "") && "todo")} value={facts.what ?? ""}
+                      onChange={(e) => updatePlan((p) => { p.services[name] = { ...p.services[name], what: e.target.value }; })} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Section>
 
-          <section className="card">
-            <h2 className="card-title">What Overwatch will watch: {plan.checks.filter((c) => c.enabled).length} checks</h2>
-            <ul className="check-list">
+          <div className="wizard-actions">
+            <button type="button" className="btn" onClick={() => setStep("connect")}>← Back</button>
+            <button type="button" className="btn btn-primary" onClick={() => setStep("watch")}>Continue →</button>
+          </div>
+        </div>
+      )}
+
+      {step === "watch" && plan && (
+        <div className="s-stack">
+          <Section title={`Checks · ${plan.checks.filter((c) => c.enabled).length} on`} description="What the Watcher evaluates on every pass.">
+            <ul className="toggle-grid">
               {plan.checks.map((c, i) => (
                 <li key={c.name}>
-                  <label className="toggle">
-                    <input type="checkbox" checked={c.enabled} onChange={(e) => updatePlan((p) => { p.checks[i].enabled = e.target.checked; return p; })} />
-                    <span>
-                      <b>{c.name}</b> <span className="kind-chip">{c.kind ?? "metric"}</span>
-                      <span className="field-hint">{c.why || c.description}</span>
-                    </span>
-                  </label>
+                  <Switch checked={c.enabled} onChange={(v) => updatePlan((p) => { p.checks[i].enabled = v; })}
+                    label={<><span className="mono">{c.name}</span> <span className="tag">{c.kind ?? "metric"}</span></>} hint={c.why || c.description} />
                 </li>
               ))}
             </ul>
-          </section>
+          </Section>
 
-          <section className="card">
-            <h2 className="card-title">Evidence gathered the moment something breaks</h2>
-            <ul className="check-list">
+          <Section title="Evidence" description="Gathered in parallel the moment something breaks, before the AI starts reasoning.">
+            <ul className="toggle-grid">
               {plan.evidence.map((e, i) => (
                 <li key={e.name}>
-                  <label className="toggle">
-                    <input type="checkbox" checked={e.enabled} onChange={(ev) => updatePlan((p) => { p.evidence[i].enabled = ev.target.checked; return p; })} />
-                    <span><b>{e.label}</b><span className="field-hint">from {e.source}</span></span>
-                  </label>
+                  <Switch checked={e.enabled} onChange={(v) => updatePlan((p) => { p.evidence[i].enabled = v; })} label={e.label} hint={`from ${e.source}`} />
                 </li>
               ))}
-              <li className="field-hint">Plus, built in: changes reported to Overwatch{plan.docker.project ? ", container state and container events" : ""}.</li>
             </ul>
-          </section>
+            <p className="field-hint">Always included: changes reported to Overwatch{plan.docker.project ? ", container state and container events" : ""}.</p>
+          </Section>
 
-          <section className="card">
-            <details>
-              <summary className="card-title">The configuration file it will write</summary>
+          <Section title="Notifications" description="Where a diagnosis goes after it is approved.">
+            <NotificationsEditor value={notifiers} onChange={setNotifiers} />
+          </Section>
+
+          <Section title="Watching & approval" description="How quickly Overwatch reacts, and who decides what gets sent.">
+            <WatchEditor watch={watch} approval={approval} onWatch={setWatch} onApproval={setApproval} />
+          </Section>
+
+          <Section title="Configuration file" description="Secrets (database passwords, API keys, webhook URLs) go into .env next to it, never into this file.">
+            <details className="yaml-details">
+              <summary>Preview the generated overwatch.yaml</summary>
               <pre className="sql yaml-preview">{yaml}</pre>
-              <p className="field-hint">Secrets (database addresses with passwords, the AI key) go into .env next to it, not into this file.</p>
             </details>
-          </section>
+          </Section>
 
-          <div className="setup-actions">
-            <button className="btn" onClick={() => setStep("connect")} disabled={step === "saving"}>Back</button>
-            <button className="btn btn-primary" onClick={save} disabled={step === "saving" || !plan.checks.some((c) => c.enabled)}>
-              {step === "saving" ? "Starting…" : "Save and start watching"}
+          <div className="wizard-actions">
+            <button type="button" className="btn" onClick={() => setStep("system")} disabled={saving}>← Back</button>
+            <button type="button" className="btn btn-primary" onClick={save} disabled={saving || !plan.checks.some((c) => c.enabled)}>
+              {saving ? "Starting…" : "Save and start watching"}
             </button>
           </div>
         </div>

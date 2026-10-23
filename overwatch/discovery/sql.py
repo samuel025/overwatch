@@ -29,7 +29,18 @@ def _ts_column(cols: list[dict[str, Any]]) -> str | None:
     return next((c["name"] for c in cols if any(t in str(c["type"]).lower() for t in TS_TYPES)), None)
 
 
-def discover_sql(name: str, url: str, max_tables: int = 40) -> dict[str, Any]:
+def ago(target: str, n: int, unit: str) -> str:
+    """'n units ago' in the SQL dialect the generated queries will run in."""
+    if target == "zetaris":  # Spark SQL
+        return f"current_timestamp() - INTERVAL {n} {unit.upper()}"
+    return f"now() - interval '{n} {unit}'"
+
+
+def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direct") -> dict[str, Any]:
+    """Inspect a database. `target` is where the generated checks and evidence will run: "direct" (its own
+    dialect, plain table names) or "zetaris" (Spark SQL, tables qualified as <name>.<table>)."""
+    zet = target == "zetaris"
+    qual = (lambda table: f"{name}.{table}") if zet else (lambda table: table)
     engine = create_engine(sqlalchemy_url(url), pool_pre_ping=True)
     dialect = engine.dialect.name
     insp = inspect(engine)
@@ -91,26 +102,36 @@ def discover_sql(name: str, url: str, max_tables: int = 40) -> dict[str, Any]:
     engine.dispose()
 
     # Catalog text for the Investigator.
-    lines = [f"{name} ({'PostgreSQL' if dialect == 'postgresql' else dialect} SQL):"]
+    lines = [f"{name} ({'PostgreSQL' if dialect == 'postgresql' else dialect} SQL):"] if not zet else \
+        [f"{name} ({'PostgreSQL' if dialect == 'postgresql' else dialect} database, in Zetaris as {name}.<table>):"]
     for t in tables:
         cols = ", ".join(f"{c['name']} {c['type'].split('(')[0]}" for c in t["columns"][:20])
         est = f"  (~{rows_estimate[t['name']]:,} rows)" if rows_estimate.get(t["name"], 0) > 0 else ""
-        lines.append(f"  {t['name']}({cols}){est}")
-    if pg_health.get("pg_stat_activity"):
+        lines.append(f"  {qual(t['name'])}({cols}){est}")
+    if pg_health.get("pg_stat_activity") and not zet:
         lines.append("  Postgres health views: pg_stat_activity, pg_locks, pg_indexes, pg_stat_user_tables"
                      + (", pg_stat_statements" if pg_health.get("pg_stat_statements") else ""))
 
     checks, evidence = [], []
     pg = dialect == "postgresql"
-    window = "now() - interval '40 seconds'" if pg else "datetime('now', '-40 seconds')"
+    if zet:
+        window = ago("zetaris", 40, "seconds")
+    else:
+        window = "now() - interval '40 seconds'" if pg else "datetime('now', '-40 seconds')"
+
+    def since(n: int, unit: str) -> str:
+        if zet:
+            return ago("zetaris", n, unit)
+        return f"now() - interval '{n} {unit}'" if pg else f"datetime('now', '-{n} {unit}')"
+
     if m := roles.get("metrics"):
         for svc in m["services"]:
             key = svc.replace("-", "_").replace(".", "_")
             if m["latency"]:
                 unit = "_ms" if m["latency"].endswith("_ms") else ""
                 checks.append({
-                    "name": f"{key}_latency{unit}", "service": svc, "source": name,
-                    "query": f"SELECT avg({m['latency']}) AS value FROM {m['table']} "
+                    "name": f"{key}_latency{unit}", "service": svc, "source": "zetaris" if zet else name,
+                    "query": f"SELECT avg({m['latency']}) AS value FROM {qual(m['table'])} "
                              f"WHERE service = '{svc}' AND {m['ts']} > {window}",
                     "relative_factor": 4, "relative_min": 100 if unit else 0.1, "no_data": "alert",
                     "description": f"{svc} {m['latency']}, last 40s", "severity": "high",
@@ -118,37 +139,46 @@ def discover_sql(name: str, url: str, max_tables: int = 40) -> dict[str, Any]:
                 })
             if m["errors"]:
                 checks.append({
-                    "name": f"{key}_error_rate", "service": svc, "source": name,
-                    "query": f"SELECT avg({m['errors']}) AS value FROM {m['table']} "
+                    "name": f"{key}_error_rate", "service": svc, "source": "zetaris" if zet else name,
+                    "query": f"SELECT avg({m['errors']}) AS value FROM {qual(m['table'])} "
                              f"WHERE service = '{svc}' AND {m['ts']} > {window}",
                     "threshold": 0.05, "description": f"{svc} {m['errors']} (0-1), last 40s", "severity": "high",
                     "why": f"{m['table']}.{m['errors']}: alerts above 5% errors",
                 })
-        evidence.append({
-            "name": f"{name}_service_health", "label": "Latency and errors per service, last 2 minutes vs last hour",
-            "source": name,
-            "query": (f"SELECT service, round((avg({m['latency'] or 'NULL'}) FILTER (WHERE {m['ts']} > now() - interval '2 minutes'))::numeric, 1) AS latency_now, "
-                      f"round(avg({m['latency'] or 'NULL'})::numeric, 1) AS latency_hour, "
-                      f"round((avg({m['errors'] or 'NULL'}) FILTER (WHERE {m['ts']} > now() - interval '2 minutes'))::numeric, 3) AS errors_now "
-                      f"FROM {m['table']} WHERE {m['ts']} > now() - interval '1 hour' GROUP BY 1 ORDER BY 1")
-            if pg else f"SELECT service, avg({m['latency'] or 'NULL'}), avg({m['errors'] or 'NULL'}) FROM {m['table']} GROUP BY 1",
-        })
+        lat, err, t = m["latency"] or "NULL", m["errors"] or "NULL", qual(m["table"])
+        if zet:
+            q = (f"SELECT service, round(avg(CASE WHEN {m['ts']} > {since(2, 'minutes')} THEN {lat} END), 1) AS latency_now, "
+                 f"round(avg({lat}), 1) AS latency_hour, "
+                 f"round(avg(CASE WHEN {m['ts']} > {since(2, 'minutes')} THEN {err} END), 3) AS errors_now "
+                 f"FROM {t} WHERE {m['ts']} > {since(1, 'hour')} GROUP BY service ORDER BY service")
+        elif pg:
+            q = (f"SELECT service, round((avg({lat}) FILTER (WHERE {m['ts']} > now() - interval '2 minutes'))::numeric, 1) AS latency_now, "
+                 f"round(avg({lat})::numeric, 1) AS latency_hour, "
+                 f"round((avg({err}) FILTER (WHERE {m['ts']} > now() - interval '2 minutes'))::numeric, 3) AS errors_now "
+                 f"FROM {t} WHERE {m['ts']} > now() - interval '1 hour' GROUP BY 1 ORDER BY 1")
+        else:
+            q = f"SELECT service, avg({lat}), avg({err}) FROM {t} GROUP BY 1"
+        evidence.append({"name": f"{name}_service_health",
+                         "label": "Latency and errors per service, last 2 minutes vs last hour",
+                         "source": "zetaris" if zet else name, "query": q})
     if c := roles.get("changes"):
         evidence.append({
-            "name": f"{name}_changes", "label": f"Changes in the last 30 minutes ({c['table']})", "source": name,
-            "query": f"SELECT * FROM {c['table']} WHERE {c['ts']} > "
-                     + ("now() - interval '30 minutes'" if pg else "datetime('now', '-30 minutes')")
-                     + f" ORDER BY {c['ts']} DESC LIMIT 15",
+            "name": f"{name}_changes", "label": f"Changes in the last 30 minutes ({c['table']})",
+            "source": "zetaris" if zet else name,
+            "query": f"SELECT * FROM {qual(c['table'])} WHERE {c['ts']} > {since(30, 'minutes')} "
+                     f"ORDER BY {c['ts']} DESC LIMIT 15",
         })
     if lg := roles.get("logs"):
+        msg = "substr(message, 1, 160)" if zet else "left(message, 160)"
         evidence.append({
-            "name": f"{name}_top_errors", "label": f"Top error messages in the last 5 minutes ({lg['table']})", "source": name,
-            "query": f"SELECT left(message, 160) AS message, count(*) AS n FROM {lg['table']} "
-                     f"WHERE upper({lg['level']}) IN ('ERROR', 'FATAL', 'CRITICAL') AND {lg['ts']} > now() - interval '5 minutes' "
-                     "GROUP BY 1 ORDER BY n DESC LIMIT 10" if pg else
+            "name": f"{name}_top_errors", "label": f"Top error messages in the last 5 minutes ({lg['table']})",
+            "source": "zetaris" if zet else name,
+            "query": f"SELECT {msg} AS message, count(*) AS n FROM {qual(lg['table'])} "
+                     f"WHERE upper({lg['level']}) IN ('ERROR', 'FATAL', 'CRITICAL') AND {lg['ts']} > {since(5, 'minutes')} "
+                     "GROUP BY 1 ORDER BY n DESC LIMIT 10" if (pg or zet) else
                      f"SELECT message, count(*) AS n FROM {lg['table']} GROUP BY 1 ORDER BY n DESC LIMIT 10",
         })
-    if pg_health.get("pg_stat_activity"):
+    if pg_health.get("pg_stat_activity") and not zet:  # system views are not federated tables
         evidence.append({
             "name": f"{name}_db_activity", "label": f"Busy or waiting sessions on {name}", "source": name,
             "query": "SELECT application_name, state, wait_event_type, wait_event, left(query, 120) AS query, "
@@ -165,6 +195,6 @@ def discover_sql(name: str, url: str, max_tables: int = 40) -> dict[str, Any]:
         "name": name, "dialect": dialect, "tables": [t["name"] for t in tables], "catalog": "\n".join(lines),
         "roles": {k: v.get("table") for k, v in roles.items()}, "checks": checks, "evidence": evidence, "notes": notes,
         "services": roles.get("metrics", {}).get("services", []),
-        "logs": roles.get("logs"),
+        "logs": {**roles["logs"], "table": qual(roles["logs"]["table"])} if roles.get("logs") else None,
         "log_hits": log_hits,
     }

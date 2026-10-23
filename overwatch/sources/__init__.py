@@ -4,15 +4,20 @@ from typing import Any
 
 from .base import DataSource, SourceError
 from .docker import DockerSource
+from .kubernetes import KubernetesSource
+from .loki import LokiSource
 from .prometheus import PrometheusSource
 from .sql import SQLSource
+from .zetaris import ZetarisSource
 
 SOURCE_TYPES: dict[str, type[DataSource]] = {
     "sql": SQLSource,
-    "zetaris": SQLSource,  # Zetaris exposes a SQL endpoint; same adapter, separate name for clarity
+    "zetaris": ZetarisSource,  # the data layer: JDBC with the Zetaris driver, Spark SQL
     "postgres": SQLSource,
     "prometheus": PrometheusSource,
     "docker": DockerSource,
+    "kubernetes": KubernetesSource,
+    "loki": LokiSource,
 }
 
 
