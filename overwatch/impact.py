@@ -79,14 +79,19 @@ def spread(topology: dict[str, list[str]], origin: str | None, failing: set[str]
     }
 
 
+def timestamp_literal(iso: str, source: DataSource) -> str:
+    """A timestamp the source's SQL dialect accepts: Postgres casts, Zetaris (Spark SQL) converts."""
+    return f"to_timestamp('{iso}')" if source.__class__.__name__ == "ZetarisSource" else f"'{iso}'::timestamptz"
+
+
 def measure(sources: dict[str, DataSource], impacts: list[ImpactConfig], since: float) -> list[dict[str, Any]]:
     """Run each impact query from the incident start. `{since}` becomes a timestamp literal."""
-    literal = "'" + datetime.fromtimestamp(since, timezone.utc).isoformat() + "'::timestamptz"
+    iso = datetime.fromtimestamp(since, timezone.utc).isoformat()
     out = []
     for imp in impacts:
         item: dict[str, Any] = {"name": imp.name, "label": imp.label, "unit": imp.unit, "value": None}
         try:
-            rows = sources[imp.source].query(imp.query.replace("{since}", literal))
+            rows = sources[imp.source].query(imp.query.replace("{since}", timestamp_literal(iso, sources[imp.source])))
             value = next((v for v in (rows[0].values() if rows else []) if isinstance(v, (int, float))), None)
             item["value"] = round(float(value), 2) if value is not None else None
         except (SourceError, KeyError) as e:

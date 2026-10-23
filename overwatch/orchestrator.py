@@ -19,7 +19,7 @@ from typing import Any, Callable
 from .agents import Historian, Investigator, Responder, Watcher
 from .config import Config, EvidenceConfig
 from .events import EventBus
-from .impact import incident_start, measure, spread
+from .impact import incident_start, measure, spread, timestamp_literal
 from .listeners import LISTENER_TYPES
 from .llm import LLM
 from .memory import build_memory
@@ -271,10 +271,9 @@ class Overwatch:
         if not self.cfg.evidence:
             return []
         since = datetime.fromtimestamp(_ts(incident.opened_at) - 900, timezone.utc).isoformat()
-        literal = f"'{since}'::timestamptz"
 
         def run(item) -> Evidence:
-            query = item.query.replace("{since}", literal)
+            query = item.query.replace("{since}", timestamp_literal(since, self.sources[item.source]))
             self.events.emit("query.started", incident=incident.id, step=0, source=item.source, query=query,
                              purpose=item.label)
             ev = self.investigator._run_query({"source": item.source, "query": query, "purpose": item.label})

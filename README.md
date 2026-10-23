@@ -135,7 +135,7 @@ flowchart LR
 | **Meterless Nightshift** (provider, "Power") | Primary AI provider | Every model call goes through one OpenAI-compatible client (`overwatch/llm.py`) pointed at Nightshift's local endpoint, with the `meterless-app` / `meterless-scope` headers and the bearer token from Nightshift's `proxy-token` file. Each call is logged to `traces/llm_calls.jsonl`. | `.env` (`LLM_BASE_URL`), the console's *Under the hood → AI calls* |
 | **NVIDIA Nemotron** | Model (NVIDIA award) | Powers the Investigator's reasoning. Connected as a provider inside Nightshift; during development it can also be called directly at `integrate.api.nvidia.com`. Tested with `nvidia/nemotron-3-ultra-550b-a55b`. | The console header (*AI*) |
 
-> **Status, honestly:** the Zetaris integration is written from Zetaris's documentation and unit-tested against a fake JDBC connection, but **has not yet been run against a real Zetaris install**. Until it is, the demo reads two Postgres databases directly (the `direct` backend). The Investigator has been tested against NVIDIA's API directly because Nightshift's current build targets NVIDIA DGX Spark (ARM64) and there is no Ubuntu x86_64 installer; Meterless confirmed that integrating Meterless Runtime as a provider (done: `overwatch/llm.py`) and testing with NVIDIA's hosted API satisfies the requirement. Switching to Nightshift is a two-line change in `.env` (see [Using Nightshift from another machine](#using-nightshift-from-another-machine)). Switching to Zetaris is setting the `ZETARIS_*` variables and re-running setup.
+> **Status, honestly:** the Zetaris integration has been run against a real Zetaris 2.4.3 install (23 Oct): JDBC with its own driver, `CREATE/REGISTER DATASOURCE`, Spark SQL time windows, a join across two databases, and a full incident investigation whose every query went through Zetaris (`overwatch.zetaris.yaml`). Not yet run through Zetaris: Loki and Kubernetes (they stay live API sources) and the full 14-fault benchmark. The Investigator has been tested against NVIDIA's API directly because Nightshift's current build targets NVIDIA DGX Spark (ARM64) and there is no Ubuntu x86_64 installer; Meterless confirmed that integrating Meterless Runtime as a provider (done: `overwatch/llm.py`) and testing with NVIDIA's hosted API satisfies the requirement. Switching to Nightshift is a two-line change in `.env` (see [Using Nightshift from another machine](#using-nightshift-from-another-machine)). Switching to Zetaris is setting the `ZETARIS_*` variables and re-running setup.
 
 ---
 
@@ -221,6 +221,16 @@ Every line should say `[ok]`: both data sources, the AI provider, memory, all 10
 ```bash
 ../../.venv/bin/overwatch -c overwatch.yaml run
 ```
+
+**Through Zetaris instead** (needs Zetaris running and the `ZETARIS_*` variables from `.env.example` set; also `pip install jaydebeapi` and a Java runtime):
+
+```bash
+python scripts/register_zetaris.py                      # registers opsdb and shopdb in Zetaris (safe to repeat)
+python scripts/make_zetaris_config.py                   # writes overwatch.zetaris.yaml from overwatch.yaml
+../../.venv/bin/overwatch -c overwatch.zetaris.yaml run
+```
+
+Every check, impact query and investigation query then goes through Zetaris (`opsdb.request_metrics`, `shopdb.orders`, ...), so one query can join across both databases. Live Postgres internals (`pg_stat_activity`, locks, indexes) are not tables Zetaris can register, so they stay on a direct `shopdb_live` source. If Zetaris runs in Docker on Linux, set `ZETARIS_HOST_ALIAS=172.17.0.1` so it can reach your databases.
 
 Open **http://127.0.0.1:8080**. If you set `OVERWATCH_TOKEN`, open `http://127.0.0.1:8080/?token=<your token>` once; the browser remembers it.
 
