@@ -12,9 +12,21 @@ export interface Check {
   relative_factor: number | null;
   relative_min: number;
   baseline: number | null;
-  kind: "metric" | "heartbeat";
+  kind: "metric" | "heartbeat" | "probe";
   failing: boolean;
+  suspected: boolean;
 }
+
+export interface Hypothesis {
+  text: string;
+  confidence: number;
+  origin_service: string | null;
+  check_next: string;
+  model: string;
+  seconds: number;
+}
+
+export type DownMap = Record<string, { service: string; since: number; detail: string }>;
 
 export interface Anomaly {
   check: string;
@@ -82,6 +94,19 @@ export interface Incident {
   origin_service: string | null;
   blast_radius: BlastRadius | Record<string, never>;
   recovered_at: string | null;
+  pack: Evidence[];
+  hypothesis: Hypothesis | Record<string, never>;
+  started_at: number | null;
+  hypotheses: { cause: string; verdict: string; why: string }[];
+  cited: { step: number; quote: string; shows: string }[];
+  first_guess_verdict: { verdict?: string; why?: string };
+  grounding: {
+    verified?: number;
+    total?: number;
+    unverified?: { step: number; quote: string }[];
+    unsupported_terms?: string[];
+    ok?: boolean;
+  };
 }
 
 export interface Status {
@@ -92,6 +117,7 @@ export interface Status {
   sources: { name: string; language: string; type: string }[];
   interval_seconds: number;
   topology: Record<string, string[]>;
+  down: DownMap;
   incidents: Incident[];
   approval: "manual" | "auto";
   memory_engine: string;
@@ -107,9 +133,11 @@ export interface MemoryOverview {
 
 /** Everything the backend publishes on /api/events. */
 export type OwEvent = { id: number; ts: number } & (
-  | { type: "watch.tick"; values: Record<string, number | null>; failing: string[] }
+  | { type: "watch.tick"; values: Record<string, number | null>; failing: string[]; suspected: string[] }
+  | { type: "service.event"; state: "down" | "up"; service: string; instance: string; detail: string }
+  | ({ type: "investigator.hypothesis"; incident: string } & Hypothesis)
   | { type: "incident.opened" | "incident.updated"; incident: Incident }
-  | { type: "agent.working"; agent: "historian" | "responder"; incident: string }
+  | { type: "agent.working"; agent: "evidence" | "historian" | "responder"; incident: string }
   | { type: "agent.thinking"; agent: "investigator"; incident: string; step: number }
   | { type: "memory.recalled"; incident: string; engine: string; memories: Memory[] }
   | { type: "investigator.thought"; incident: string; step: number; thought: string; action: string }
@@ -123,6 +151,7 @@ export type OwEvent = { id: number; ts: number } & (
       row_count: number;
       rows: Record<string, unknown>[];
       ms: number;
+      purpose?: string;
     }
   | {
       type: "investigator.concluded";

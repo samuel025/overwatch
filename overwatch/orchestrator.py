@@ -8,6 +8,7 @@ incident recovers on its own once all of its checks have stayed healthy for a wh
 from __future__ import annotations
 
 import json
+import statistics
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,9 +20,10 @@ from .agents import Historian, Investigator, Responder, Watcher
 from .config import Config
 from .events import EventBus
 from .impact import incident_start, measure, spread
+from .listeners import LISTENER_TYPES
 from .llm import LLM
 from .memory import build_memory
-from .models import Anomaly, Incident, now_iso
+from .models import Anomaly, Evidence, Incident, now_iso
 from .notifiers import build_notifiers
 from .sources import build_sources
 from .store import IncidentStore
@@ -43,7 +45,7 @@ class Overwatch:
         self.llm = LLM(cfg.llm, self.trace_dir)
         self.llm.on_call = lambda record: self.events.emit("llm.call", **record)
         self.memory = build_memory(memory_override or cfg.memory)
-        self.watcher = Watcher(cfg.checks, self.sources)
+        self.watcher = Watcher(cfg.checks, self.sources, confirm_samples=cfg.confirm_samples)
         self.historian = Historian(self.memory)
         self.investigator = Investigator(cfg, self.llm, self.sources, emit=self.events.emit)
         self.responder = Responder(build_notifiers(cfg.notifiers), self.memory)
@@ -56,7 +58,16 @@ class Overwatch:
         self.healthy_since: dict[str, float] = {}  # incident id -> when all its checks first looked healthy
         self.pool = ThreadPoolExecutor(cfg.max_parallel_investigations, thread_name_prefix="investigation")
         self.store = IncidentStore(cfg.state_path or self.trace_dir / "overwatch.db")
+        # instance -> {service, since, detail} for containers a pushed event says are down
+        self.down: dict[str, dict[str, Any]] = {}
+        self.listeners = [
+            LISTENER_TYPES[e["type"]](e, self.on_container_event) for e in cfg.events if e.get("type") in LISTENER_TYPES
+        ]
         self._restore()
+
+    def start_listeners(self) -> None:
+        for listener in self.listeners:
+            listener.start()
 
     # -- pipeline -----------------------------------------------------------------
 
@@ -66,18 +77,56 @@ class Overwatch:
         self.failing = {a.check for a in anomalies}
         self.last_check_at = now_iso()
         self.events.emit("watch.tick", values=dict(self.watcher.last_values),
-                         failing=[a.check for a in anomalies])
-        self._track_recovery({a.check for a in anomalies})
-        fresh = [a for a in anomalies if not self._covered(a)]
-        if not fresh:
+                         failing=[a.check for a in anomalies], suspected=sorted(self.watcher.suspected))
+        self._track_recovery(self.failing)
+        return self.ingest(anomalies)
+
+    def ingest(self, anomalies: list[Anomaly]) -> Incident | None:
+        """Route anomalies from any origin (checks, pushed events, external alerts) into incidents."""
+        if self._stop.is_set():  # e.g. a delayed event timer firing during shutdown
             return None
-        target = self._merge_target()
-        if target:
-            self._merge(target, fresh)
-            return target
-        incident = self.open_incident(fresh)
-        self.pool.submit(self._investigate_safely, incident)
+        with self.lock:
+            fresh = [a for a in anomalies if not self._covered(a)]
+            if not fresh:
+                return None
+            target = self._merge_target()
+            if target:
+                self._merge(target, fresh)
+                return target
+            incident = self.open_incident(fresh)
+        try:
+            self.pool.submit(self._investigate_safely, incident)
+        except RuntimeError:  # shutting down between the check above and here
+            pass
         return incident
+
+    def on_container_event(self, kind: str, service: str, instance: str, detail: str) -> None:
+        """A pushed container event: mark it on the map at once and open/extend an incident on 'down'."""
+        if kind == "down":
+            since = time.time()
+            with self.lock:
+                self.down[instance] = {"service": service, "since": since, "detail": detail}
+            self.events.emit("service.event", state="down", service=service, instance=instance, detail=detail)
+
+            def still_down() -> None:  # a restart comes back within the grace period: not an outage
+                with self.lock:
+                    current = self.down.get(instance)
+                if current and current["since"] == since:
+                    self.ingest([Anomaly(f"event:{instance}_down", service, None, 0.0, "event", detail)])
+
+            if self.cfg.event_grace_seconds > 0:
+                threading.Timer(self.cfg.event_grace_seconds, still_down).start()
+            else:
+                still_down()
+        else:
+            with self.lock:
+                self.down.pop(instance, None)
+            self.events.emit("service.event", state="up", service=service, instance=instance, detail=detail)
+
+    def ingest_alert(self, source: str, service: str, title: str, description: str = "") -> Incident | None:
+        """An alert pushed by another tool (Alertmanager, CI, a cloud provider)."""
+        name = f"alert:{source}:{title}"[:120]
+        return self.ingest([Anomaly(name, service or "unknown", None, 0.0, "alert", description or title)])
 
     def open_incident(self, anomalies: list[Anomaly]) -> Incident:
         incident = Incident(anomalies=anomalies)
@@ -93,10 +142,95 @@ class Overwatch:
         """Open and investigate synchronously (CLI, eval). The watch loop uses the worker pool instead."""
         return self.investigate(self.open_incident(anomalies), on_update)
 
+    def gather_evidence(self, incident: Incident) -> list[Evidence]:
+        """The evidence pack: the configured standard queries, run in parallel the moment an incident opens."""
+        if not self.cfg.evidence:
+            return []
+        since = datetime.fromtimestamp(_ts(incident.opened_at) - 900, timezone.utc).isoformat()
+        literal = f"'{since}'::timestamptz"
+
+        def run(item) -> Evidence:
+            query = item.query.replace("{since}", literal)
+            self.events.emit("query.started", incident=incident.id, step=0, source=item.source, query=query,
+                             purpose=item.label)
+            ev = self.investigator._run_query({"source": item.source, "query": query, "purpose": item.label})
+            ev.note = f"[pack] {item.label}"
+            self.events.emit("query.finished", incident=incident.id, step=0, source=ev.source, error=ev.error,
+                             row_count=len(ev.rows), rows=ev.rows[:5], ms=ev.ms, purpose=item.label)
+            return ev
+
+        with ThreadPoolExecutor(min(8, len(self.cfg.evidence)), thread_name_prefix="evidence") as pool:
+            return list(pool.map(run, self.cfg.evidence))
+
+    def build_timeline(self, incident: Incident) -> list[str]:
+        """When it started, what each signal normally reads vs now, and pushed events: computed, not guessed."""
+        detected = _ts(incident.opened_at)
+        started = incident_start(incident.anomalies, self.watcher.history, detected)
+        with self.lock:
+            down = dict(self.down)
+        for instance, d in down.items():
+            if any(a.check == f"event:{instance}_down" for a in incident.anomalies):
+                started = min(started, d["since"])
+        incident.started_at = started
+
+        def clock(t: float) -> str:
+            return datetime.fromtimestamp(t, timezone.utc).strftime("%H:%M:%S")
+
+        def num(v: float | None) -> str:
+            return "no data" if v is None else f"{v:.3g}"
+
+        lines = [f"- The problem started at {clock(started)} UTC (first failing signal); "
+                 f"Overwatch detected it at {clock(detected)} UTC."]
+        lines += [f"- Pushed event at {clock(d['since'])} UTC: {d['detail']}" for d in down.values()]
+        signals = []
+        for c in self.cfg.checks:
+            history = self.watcher.history.get(c.name, [])
+            before = [v for t, v in history if v is not None and started - 1800 <= t < started - 30]
+            normal = statistics.median(before) if len(before) >= 3 else None
+            now = self.watcher.last_values.get(c.name)
+            if normal is None and now is None:
+                continue
+            firing = " (FIRING)" if c.name in self.failing or any(a.check == c.name for a in incident.anomalies) else ""
+            signals.append(f"  {c.name} [{c.service}]: normal {num(normal)} -> now {num(now)}{firing}")
+        if signals:
+            lines.append("- Signals, normal before the start vs now:\n" + "\n".join(signals))
+        if incident.pack:
+            lines.append("- Evidence-pack rows with a timestamp carry minutes_before_start "
+                         "(positive = before the problem started, negative = after).")
+        return lines
+
+    @staticmethod
+    def _annotate(pack: list[Evidence], started: float) -> None:
+        """Label every timestamped row with how long before the start it happened."""
+        for ev in pack:
+            for row in ev.rows:
+                for key, value in list(row.items()):
+                    if isinstance(value, str) and len(value) >= 19 and value[4] == "-" and "T" in value[:20] + " T":
+                        try:
+                            ts = datetime.fromisoformat(value).timestamp()
+                        except ValueError:
+                            continue
+                        row["minutes_before_start"] = round((started - ts) / 60, 1)
+                        break
+
+    @staticmethod
+    def _pack_text(pack: list[Evidence], limit: int = 800) -> str:
+        """Short text from the pack (error messages, change descriptions) to sharpen the memory search."""
+        words = []
+        for ev in pack:
+            for row in ev.rows[:5]:
+                words += [str(v) for v in row.values() if isinstance(v, str) and len(v) > 3]
+        return " ".join(words)[:limit]
+
     def investigate(self, incident: Incident, on_update: Callable[[Incident], None] | None = None) -> Incident:
         started = time.monotonic()
+        self.events.emit("agent.working", agent="evidence", incident=incident.id)
+        incident.pack = self.gather_evidence(incident)
+        timeline = self.build_timeline(incident)
+        self._annotate(incident.pack, incident.started_at)
+        self._save(incident)
         self.events.emit("agent.working", agent="historian", incident=incident.id)
-        incident.similar_incidents = self.historian.recall(incident.anomalies)
+        incident.similar_incidents = self.historian.recall(incident.anomalies, context=self._pack_text(incident.pack))
         self.events.emit("memory.recalled", incident=incident.id, engine=self.memory.name,
                          memories=incident.similar_incidents)
 
@@ -105,7 +239,9 @@ class Overwatch:
             if on_update:
                 on_update(inc)
 
-        self.investigator.investigate(incident, on_step=step)
+        if self.investigator.triage(incident, timeline):
+            self._save(incident)
+        self.investigator.investigate(incident, on_step=step, timeline=timeline)
         incident.reasoning.append(f"Investigation took {time.monotonic() - started:.1f}s")
         if incident.status == "investigating":  # "failed" stays failed: there is nothing to approve
             incident.status = "awaiting_approval"
@@ -220,6 +356,7 @@ class Overwatch:
                         "severity": c.severity,
                         "kind": c.kind,
                         "failing": c.name in self.failing,
+                        "suspected": c.name in self.watcher.suspected,
                         "relative_factor": c.relative_factor,
                         "relative_min": c.relative_min,
                         "baseline": self.watcher.baseline(c) if c.relative_factor else None,
@@ -231,6 +368,7 @@ class Overwatch:
                             for n, s in self.sources.items()],
                 "interval_seconds": self.cfg.interval_seconds,
                 "topology": self.cfg.topology,
+                "down": dict(self.down),
                 "incidents": [i.to_dict() for i in sorted(self.incidents.values(), key=lambda i: i.opened_at, reverse=True)],
                 "approval": self.cfg.approval,
                 "memory_engine": self.memory.name,
@@ -270,10 +408,11 @@ class Overwatch:
         with self.lock:  # failed investigations too: the system can recover whether or not we explained it
             candidates = [i for i in self.incidents.values()
                           if i.status in (*ACTIVE_STATES, "failed") and not i.recovered_at]
+            failing = failing | {f"event:{instance}_down" for instance in self.down}
         for inc in candidates:
-            checks = {a.check for a in inc.anomalies if a.check != "manual_report"}
+            checks = {a.check for a in inc.anomalies if a.check != "manual_report" and not a.check.startswith("alert:")}
             if not checks:
-                continue  # a human report has no check to watch; a human closes it
+                continue  # a human report or external alert has no check to watch; a human closes it
             if checks & failing:
                 self.healthy_since.pop(inc.id, None)
                 continue

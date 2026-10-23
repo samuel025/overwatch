@@ -1,7 +1,7 @@
 import { formatCheckValue, humanize } from "./format";
-import type { BlastRadius, Check, Incident } from "./types";
+import type { BlastRadius, Check, DownMap, Incident } from "./types";
 
-export type NodeState = "healthy" | "degraded" | "down" | "unknown";
+export type NodeState = "healthy" | "suspected" | "degraded" | "down" | "unknown";
 export type NodeRole = "cause" | "affected" | "risk" | null;
 
 export interface NodeHealth {
@@ -24,7 +24,7 @@ function shortLabel(c: Check) {
   return words.trim() || c.name;
 }
 
-export function nodeHealth(node: string, checks: Check[], blast?: BlastRadius | null): NodeHealth {
+export function nodeHealth(node: string, checks: Check[], blast?: BlastRadius | null, down: DownMap = {}): NodeHealth {
   const mine = checks.filter((c) => c.service === node);
   const role: NodeRole = blast
     ? blast.origin === node
@@ -35,18 +35,23 @@ export function nodeHealth(node: string, checks: Check[], blast?: BlastRadius | 
           ? "risk"
           : null
     : null;
-  if (!mine.length) return { state: "unknown", role, problems: [], metrics: [] };
+  const events = Object.values(down).filter((d) => d.service === node);
+  if (!mine.length && !events.length) return { state: "unknown", role, problems: [], metrics: [] };
 
-  const silent = mine.filter((c) => c.failing && (c.kind === "heartbeat" || c.value === null));
+  const silent = mine.filter((c) => c.failing && (c.kind !== "metric" || c.value === null));
   const failing = mine.filter((c) => c.failing);
-  const state: NodeState = silent.length ? "down" : failing.length ? "degraded" : "healthy";
-  const problems = silent.length
-    ? ["Not responding: no data reported"]
-    : failing.map((c) => `${shortLabel(c)} ${formatCheckValue(c, c.value)}`);
+  const suspected = mine.filter((c) => c.suspected);
+  const isDown = events.length > 0 || silent.length > 0;
+  const state: NodeState = isDown ? "down" : failing.length ? "degraded" : suspected.length ? "suspected" : "healthy";
+  const problems = events.length
+    ? events.map((d) => d.detail)
+    : silent.length
+      ? ["Not responding: no data reported"]
+      : [...failing, ...suspected].map((c) => `${shortLabel(c)} ${formatCheckValue(c, c.value)}`);
   const metrics = mine
-    .filter((c) => c.kind !== "heartbeat")
+    .filter((c) => c.kind === "metric")
     .slice(0, 2)
-    .map((c) => ({ label: shortLabel(c), value: formatCheckValue(c, c.value), bad: c.failing }));
+    .map((c) => ({ label: shortLabel(c), value: formatCheckValue(c, c.value), bad: c.failing || c.suspected }));
   return { state, role, problems, metrics };
 }
 
@@ -57,6 +62,7 @@ export function focusIncident(order: string[], incidents: Record<string, Inciden
 
 export const STATE_LABEL: Record<NodeState, string> = {
   healthy: "Healthy",
+  suspected: "Possible problem",
   degraded: "Having problems",
   down: "Not responding",
   unknown: "No data",

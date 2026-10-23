@@ -10,6 +10,7 @@ import json
 import time
 from typing import Any, Callable
 
+from .. import grounding
 from ..config import Config
 from ..llm import LLM, LLMError
 from ..models import Evidence, Incident
@@ -30,9 +31,21 @@ How to work:
 - If a service runs several instances, compare them: one bad instance looks like a partly broken service.
 - External dependencies (third-party APIs, certificates, quotas) fail too, with nothing changing on your side.
 - Gradual problems (leaks, growing queues, filling disks) show as a trend: compare several time windows.
+- Use the incident timeline. A cause must start BEFORE (or exactly when) the problem started, usually just
+  before. A change long before the start is unlikely to be the cause unless the data shows a delayed effect.
 - A change shortly before the problem is a suspect, not proof. Show the mechanism that links it to the symptom.
+- Timing alone never proves cause. A change counts as the cause only if it touches the failing service or
+  something it depends on (see the topology) AND you can name how it produces the symptom. Changes to
+  unrelated services (other teams) are coincidences unless the data links them. If nothing explains why a
+  service stopped, say that the trigger is unknown rather than picking the nearest change.
+- Only state facts that appear in the context or in query results. Never assume infrastructure, tools or
+  mechanisms you were not told about (for example, do not assume Kubernetes, load balancers or probes).
+- Work as a differential diagnosis: keep 2-3 candidate causes in mind and look for evidence that would rule
+  each one in or out.
 - There can be more than one independent cause. If so, name each one.
 - If your own queries fail because a data source is unreachable, that may itself be the incident.
+- Conclude as soon as the evidence clearly supports a cause. After the evidence pack, most incidents need
+  only 2-4 more queries; spending the whole budget is a sign you are not converging.
 - Never invent tables, columns or numbers. Use only the catalog and what queries return.
 - If a query errors, read the error and fix the query.
 
@@ -42,10 +55,26 @@ or, when the evidence is sufficient:
 {"thought": "<summary of reasoning>", "action": "conclude",
  "root_cause": "<one or two sentences: what broke, why, and what triggered it>",
  "confidence": <0.0-1.0>, "severity": "low|medium|high|critical",
- "evidence_steps": [<step numbers whose results support the root cause>],
- "memory_used": [<ids of past incidents that matched, or empty>],
  "origin_service": "<the service where the root cause lives, from the topology if one is given>",
- "recommended_actions": ["<concrete fix>", "..."]}"""
+ "hypotheses": [{"cause": "<candidate cause>", "verdict": "confirmed|ruled out|possible",
+                 "why": "<the evidence that decides it>"}],
+ "evidence": [{"step": <step number, 0 = the evidence pack>,
+               "quote": "<a value or text copied EXACTLY from that step's result>",
+               "shows": "<what it proves>"}],
+ "first_guess": {"verdict": "agree|disagree|none", "why": "<if a first guess was given: why it is right or wrong>"},
+ "memory_used": [<ids of past incidents that matched, or empty>],
+ "recommended_actions": ["<concrete fix>", "..."]}
+Every claim in root_cause must be backed by an item in "evidence"; quotes are checked against the data."""
+
+
+TRIAGE_PROMPT = """You are an on-call engineer giving a FAST first guess about a live production problem.
+You cannot run queries. Base the guess on the CURRENT evidence: the anomalies and the evidence pack
+(container state, error messages, recent changes, per-service metrics). Past incidents are only hints;
+they are often a different problem, so never prefer them over what the current data shows.
+Reply with exactly ONE JSON object:
+{"hypothesis": "<one or two sentences: the most likely cause and the mechanism>",
+ "confidence": <0.0-1.0>, "origin_service": "<service where the cause most likely lives>",
+ "check_next": "<the one thing that would confirm or refute it>"}"""
 
 
 def _describe_sources(sources: dict[str, DataSource]) -> str:
@@ -66,16 +95,28 @@ class Investigator:
         self.sources = sources
         self.emit = emit or (lambda *_a, **_k: None)
 
-    def investigate(self, incident: Incident, on_step=None) -> Incident:
+    def known_text(self) -> str:
+        """Everything Overwatch tells the model about the system (also the reference for grounding)."""
+        cfg = self.cfg
+        parts = [cfg.system_description, cfg.catalog, cfg.runtime_facts,
+                 json.dumps(cfg.services), json.dumps(cfg.topology), " ".join(self.sources)]
+        return " ".join(parts)
+
+    def _context(self, incident: Incident, timeline: list[str] | None = None) -> list[str]:
         cfg = self.cfg
         context = [
             f"System: {cfg.system_name}. {cfg.system_description}",
+            *(["Service knowledge (from the team):\n" + "\n".join(
+                f"- {name}: " + "; ".join(f"{k}: {v}" for k, v in facts.items())
+                for name, facts in cfg.services.items())] if cfg.services else []),
+            *([f"Runtime facts:\n{cfg.runtime_facts.strip()}"] if cfg.runtime_facts else []),
             f"Data sources:\n{_describe_sources(self.sources)}",
             f"Catalog (what you can query):\n{cfg.catalog}",
             *(["Service topology (caller -> services it calls):\n" + "\n".join(
                 f"- {svc} -> {', '.join(deps) or '(nothing)'}" for svc, deps in cfg.topology.items())]
               if cfg.topology else []),
             "Detected anomalies:\n" + "\n".join(f"- {a.summary()} at {a.detected_at}" for a in incident.anomalies),
+            *([ "Incident timeline (computed by Overwatch from the data):\n" + "\n".join(timeline)] if timeline else []),
         ]
         real_memories = [m for m in incident.similar_incidents if m.get("id") not in (None, "-")]
         if real_memories:
@@ -85,6 +126,55 @@ class Investigator:
             )
         else:
             context.append("Similar past incidents: none found.")
+        if incident.pack:
+            context.append(
+                "Evidence already gathered automatically when the incident opened (do not re-run these; "
+                "query further only for what they do not answer):\n"
+                + "\n".join(
+                    f"- {ev.note.removeprefix('[pack] ')} ({ev.source}): "
+                    + (f"ERROR {ev.error}" if ev.error else f"{len(ev.rows)} rows {_clip(ev.rows, 1500)}")
+                    for ev in incident.pack
+                )
+            )
+        return context
+
+    def triage(self, incident: Incident, timeline: list[str] | None = None) -> dict[str, Any]:
+        """One quick call to a fast model for a first guess, shown while the deep investigation runs."""
+        model = self.cfg.llm.triage_model
+        if not model:
+            return {}
+        self.emit("agent.thinking", agent="investigator", incident=incident.id, step=0)
+        messages = [
+            {"role": "system", "content": TRIAGE_PROMPT},
+            {"role": "user", "content": "\n\n".join(self._context(incident, timeline)) + "\n\nYour first guess:"},
+        ]
+        started = time.perf_counter()
+        try:
+            reply = self.llm.chat_json(messages, model, agent="triage", extra_body=self.cfg.llm.triage_extra_body)
+        except LLMError as e:
+            incident.reasoning.append(f"fast first guess unavailable: {e}")
+            return {}
+        hypothesis = {
+            "text": str(reply.get("hypothesis", "")).strip(),
+            "confidence": max(0.0, min(1.0, float(reply.get("confidence") or 0.5))),
+            "origin_service": str(reply.get("origin_service") or "") or None,
+            "check_next": str(reply.get("check_next", "")),
+            "model": model,
+            "seconds": round(time.perf_counter() - started, 1),
+        }
+        if hypothesis["text"]:
+            incident.hypothesis = hypothesis
+            self.emit("investigator.hypothesis", incident=incident.id, **hypothesis)
+        return hypothesis
+
+    def investigate(self, incident: Incident, on_step=None, timeline: list[str] | None = None) -> Incident:
+        cfg = self.cfg
+        context = self._context(incident, timeline)
+        if incident.hypothesis.get("text"):
+            context.append(
+                f"A fast triage model's first guess (unverified, {incident.hypothesis['confidence']:.0%} sure): "
+                f"{incident.hypothesis['text']} Verify or refute it with data; do not assume it is right."
+            )
 
         budget = cfg.llm.max_steps
         messages = [
@@ -115,6 +205,7 @@ class Investigator:
 
             if action.get("action") == "conclude" and str(action.get("root_cause", "")).strip():
                 self._conclude(incident, action)
+                self._ground(incident, timeline)
                 self.emit("investigator.concluded", incident=incident.id, root_cause=incident.root_cause,
                           confidence=incident.confidence, severity=incident.severity,
                           recommended_actions=incident.recommended_actions)
@@ -167,6 +258,21 @@ class Investigator:
         ev.ms = round((time.perf_counter() - started) * 1000, 1)
         return ev
 
+    def _ground(self, incident: Incident, timeline: list[str] | None = None) -> None:
+        """Check the conclusion against the data; a poorly grounded diagnosis cannot claim high confidence."""
+        result = grounding.check(incident, self.known_text() + " " + " ".join(timeline or []))
+        incident.grounding = result
+        if not result["ok"] and incident.confidence > 0.6:
+            incident.reasoning.append(
+                f"Confidence capped at 60% (was {incident.confidence:.0%}): {result['verified']}/{result['total']} "
+                f"quotes verified, not found in the data: {', '.join(result['unsupported_terms']) or 'none'}"
+            )
+            incident.confidence = 0.6
+        guess = incident.first_guess_verdict
+        if incident.hypothesis.get("text") and guess.get("verdict") == "disagree" and not str(guess.get("why", "")).strip():
+            incident.reasoning.append("Disagrees with the first guess without saying why: treat as two competing explanations")
+            incident.confidence = min(incident.confidence, 0.5)
+
     @staticmethod
     def _conclude(incident: Incident, action: dict[str, Any]) -> None:
         incident.root_cause = str(action.get("root_cause", "")).strip()
@@ -177,7 +283,20 @@ class Investigator:
         sev = str(action.get("severity", "medium")).lower()
         incident.severity = sev if sev in ("low", "medium", "high", "critical") else "medium"
         incident.recommended_actions = [str(a) for a in action.get("recommended_actions", [])][:6]
+        cited = [c for c in action.get("evidence", []) if isinstance(c, dict)]
+        incident.cited = [
+            {"step": c.get("step"), "quote": str(c.get("quote", "")), "shows": str(c.get("shows", ""))} for c in cited
+        ][:12]
+        incident.hypotheses = [
+            {"cause": str(h.get("cause", "")), "verdict": str(h.get("verdict", "possible")), "why": str(h.get("why", ""))}
+            for h in action.get("hypotheses", []) if isinstance(h, dict) and h.get("cause")
+        ][:5]
+        fg = action.get("first_guess")
+        incident.first_guess_verdict = (
+            {"verdict": str(fg.get("verdict", "none")), "why": str(fg.get("why", ""))} if isinstance(fg, dict) else {}
+        )
         steps = {int(s) for s in action.get("evidence_steps", []) if str(s).isdigit()}
+        steps |= {int(c["step"]) for c in incident.cited if str(c.get("step")).isdigit()}
         for i, ev in enumerate(incident.evidence, 1):
             if i in steps and not ev.note.startswith("[key] "):
                 ev.note = "[key] " + ev.note

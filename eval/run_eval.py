@@ -48,7 +48,9 @@ def run_once(cfg, fault, mode: str, trace_dir: Path) -> dict:
     if fault.trigger == "report":
         incident = ow.investigate_symptom(fault.report)
     else:
-        anomalies = ow.watcher.run()
+        from overwatch.cli import confirmed_pass
+
+        anomalies = confirmed_pass(ow)
         if not anomalies:
             return {"fault": fault.name, "mode": mode, "detected": False, "correct": False, "seconds": 0, "queries": 0,
                     "root_cause": "", "missing": ["(no check fired)"], "memory_hits": []}

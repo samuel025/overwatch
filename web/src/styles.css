@@ -162,6 +162,8 @@ code { font: 12.5px var(--mono); }
   transition: border-color 250ms ease, background-color 250ms ease;
 }
 .node-healthy { --tone: var(--ok); }
+.node-suspected { --tone: var(--warn); }
+.node-suspected .node-dot { animation: breathe 1.2s ease-in-out infinite; }
 .node-degraded { --tone: var(--bad); }
 .node-down { --tone: var(--faint); border-style: dashed; background: var(--panel); }
 .node-unknown { --tone: var(--line); }
@@ -186,6 +188,7 @@ code { font: 12.5px var(--mono); }
 .map-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line-soft); padding-top: 10px; }
 .lg { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
 .lg-healthy { border: 1.5px solid var(--ok); }
+.lg-suspected { border: 1.5px solid var(--warn); }
 .lg-degraded { border: 1.5px solid var(--bad); background: color-mix(in srgb, var(--bad) 20%, transparent); }
 .lg-down { border: 1.5px dashed var(--faint); }
 .lg-risk { border: 1.5px dashed var(--warn); }
@@ -229,6 +232,21 @@ code { font: 12.5px var(--mono); }
 .impact-money dd { color: var(--bad); }
 .impact-time { line-height: 1.4; }
 
+.grounding { font-size: 12.5px; padding: 4px 8px; border-radius: 6px; width: fit-content; }
+.grounding-ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.grounding-warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.first-guess-verdict { color: var(--muted); }
+.reasoning-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 760px) { .reasoning-grid { grid-template-columns: minmax(0, 1fr); } }
+.hypotheses, .cited { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.hypotheses li { display: flex; gap: 8px; align-items: baseline; }
+.verdict { flex: none; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 5px; color: var(--muted); border: 1px solid var(--line); }
+.verdict-confirmed { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.verdict-ruled-out { color: var(--faint); text-decoration: line-through; }
+.cited li { display: flex; gap: 8px; align-items: baseline; }
+.cited code { color: #b9c4ff; word-break: break-word; }
+.cited-mark { color: var(--ok); flex: none; }
+.cited-bad .cited-mark, .cited-bad code { color: var(--warn); }
 .decision { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 10px; background: color-mix(in srgb, var(--info) 8%, var(--panel-2)); border: 1px solid color-mix(in srgb, var(--info) 30%, var(--line-soft)); }
 .status-note { font-size: 13px; }
 .resolve-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
@@ -246,6 +264,12 @@ code { font: 12.5px var(--mono); }
 }
 .story-item::before { content: ""; position: absolute; left: -22px; top: 7px; width: 9px; height: 9px; border-radius: 50%; background: var(--bg); border: 1.5px solid var(--accent); }
 .story-memory::before { border-color: #c084fc; }
+.story-pack::before { border-color: var(--ok); }
+.story-guess::before { border-color: var(--warn); }
+.pack-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.pack-list > li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: baseline; }
+.pack-list .query-details { grid-column: 1 / -1; }
+.guess { color: #f3e3b5; }
 .story-error::before { border-color: var(--bad); }
 .story-who { font-size: 11.5px; color: var(--faint); margin-bottom: 2px; }
 .story-item > p { color: #d6d9e2; }
@@ -295,6 +319,8 @@ code { font: 12.5px var(--mono); }
 .signal-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cfd3dc; }
 .signal-value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 .signal-row-bad .signal-value { color: var(--bad); }
+.signal-row-suspected { background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.signal-row-suspected .signal-value { color: var(--warn); }
 .spark { width: 64px; height: 22px; }
 .spark polyline { fill: none; stroke: var(--ok); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .spark-bad polyline { stroke: var(--bad); }

@@ -46,6 +46,10 @@ def cmd_doctor(ow: Overwatch) -> int:
     good &= _ok(h.get("engine", ow.memory.name), bool(h.get("ok")), h.get("error", f"{h.get('memories', '?')} memories"))
     print("Checks")
     for c in ow.cfg.checks:
+        if c.kind == "probe":
+            up = ow.watcher._probe(c) == 1
+            good &= _ok(c.name, up, f"{c.url} {'answered' if up else 'did not answer'}")
+            continue
         try:
             rows = ow.sources[c.source].query(c.query)
             _ok(c.name, True, f"returned {rows[:1]}")
@@ -85,8 +89,21 @@ def _finish(ow: Overwatch, inc, assume_yes: bool) -> int:
     return 0
 
 
-def cmd_check(ow: Overwatch, assume_yes: bool) -> int:
+def confirmed_pass(ow: Overwatch) -> list:
+    """Run the Watcher until a breach is confirmed or clearly absent (confirm_samples passes)."""
+    import time as _time
+
     anomalies = ow.watcher.run()
+    for _ in range(ow.cfg.confirm_samples - 1):
+        if anomalies or not ow.watcher.suspected:
+            break
+        _time.sleep(min(ow.cfg.interval_seconds, 5))
+        anomalies = ow.watcher.run()
+    return anomalies
+
+
+def cmd_check(ow: Overwatch, assume_yes: bool) -> int:
+    anomalies = confirmed_pass(ow)
     for c in ow.cfg.checks:
         print(f"  {c.name:<32} {ow.watcher.last_values.get(c.name)!s:>12}  ({c.comparison} {c.threshold})")
     if not anomalies:

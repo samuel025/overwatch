@@ -19,6 +19,13 @@ from .orchestrator import Overwatch
 DIST = Path(__file__).parent / "ui" / "dist"
 
 
+class AlertIn(BaseModel):
+    source: str = "external"
+    service: str = "unknown"
+    title: str
+    description: str = ""
+
+
 class SymptomIn(BaseModel):
     symptom: str
     service: str = "unknown"
@@ -34,6 +41,7 @@ def create_app(ow: Overwatch, watch: bool = True, token: str | None = None) -> F
     async def lifespan(_app: FastAPI):
         if watch:
             threading.Thread(target=ow.run_forever, daemon=True, name="overwatch-watch").start()
+            ow.start_listeners()
         yield
         ow.stop()
 
@@ -100,6 +108,23 @@ def create_app(ow: Overwatch, watch: bool = True, token: str | None = None) -> F
         # Runs in the background; progress arrives over /api/events.
         threading.Thread(target=ow.investigate_symptom, args=(body.symptom, body.service), daemon=True).start()
         return {"started": True}
+
+    @app.post("/api/ingest")
+    def ingest(body: dict) -> dict:
+        """Push an alert in: our own {source, service, title, description}, or a Prometheus Alertmanager webhook."""
+        alerts = []
+        if isinstance(body.get("alerts"), list):  # Alertmanager webhook payload
+            for a in body["alerts"]:
+                if a.get("status", "firing") != "firing":
+                    continue
+                labels, notes = a.get("labels", {}), a.get("annotations", {})
+                alerts.append(AlertIn(source="alertmanager", service=labels.get("service", labels.get("job", "unknown")),
+                                      title=labels.get("alertname", "alert"),
+                                      description=notes.get("summary") or notes.get("description", "")))
+        else:
+            alerts.append(AlertIn(**body))
+        opened = [ow.ingest_alert(a.source, a.service, a.title, a.description) for a in alerts]
+        return {"incidents": sorted({i.id for i in opened if i})}
 
     @app.post("/api/incidents/{incident_id}/approve")
     def approve(incident_id: str) -> dict:

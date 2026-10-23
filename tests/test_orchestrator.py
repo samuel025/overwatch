@@ -55,7 +55,8 @@ def world(tmp_path):
             ],
             llm=LLMConfig(base_url="http://unused", api_key="", investigator_model="m", summary_model="m"),
             memory={"type": "none"}, notifiers=[], trace_dir=str(tmp_path / "traces"),
-            **{"cooldown_seconds": 0, "resolve_after_seconds": 0, **overrides},
+            **{"cooldown_seconds": 0, "resolve_after_seconds": 0, "confirm_samples": 1, "event_grace_seconds": 0,
+               **overrides},
         )
         ow = Overwatch(cfg)
         ow.investigator.llm = SlowScriptedLLM()
@@ -184,4 +185,104 @@ def test_failed_investigation_still_recovers(world):
     set_value("a", 1)
     ow.check_once()
     assert inc.recovered_at is not None
+    ow.stop()
+
+
+def test_container_event_marks_down_and_opens_an_incident_at_once(world):
+    make, _ = world
+    ow = make()
+    ow.on_container_event("down", "a", "a-1", "container a-1 exited (exit code 137)")
+    assert "a-1" in ow.status()["down"]
+    [inc] = ow.incidents.values()
+    assert inc.anomalies[0].check == "event:a-1_down" and inc.anomalies[0].comparison == "event"
+    assert wait_for(lambda: inc.status == "awaiting_approval")
+    ow.check_once()
+    assert inc.recovered_at is None  # still down: the event keeps it failing
+    ow.on_container_event("up", "a", "a-1", "container a-1 started")
+    ow.check_once()
+    assert inc.recovered_at is not None
+    ow.stop()
+
+
+def test_evidence_pack_runs_first_and_reaches_the_model(world):
+    from overwatch.config import EvidenceConfig
+
+    make, set_value = world
+    ow = make(evidence=[EvidenceConfig("vals", "All values", "db", "SELECT name, value FROM m")])
+    seen = []
+    original = ow.investigator.llm.chat_json
+    ow.investigator.llm.chat_json = lambda messages, model, agent: seen.append(messages) or original(messages, model, agent)
+    set_value("a", 50)
+    inc = ow.handle(ow.watcher.run())
+    assert [e.note for e in inc.pack] == ["[pack] All values"] and len(inc.pack[0].rows) == 2
+    assert "Evidence already gathered automatically" in seen[0][1]["content"]
+    ow.stop()
+
+
+def test_fast_first_guess_is_kept_and_passed_on(world):
+    make, set_value = world
+    ow = make()
+    ow.cfg.llm.triage_model = "fast-model"
+
+    class Both:
+        def __init__(self):
+            self.models = []
+
+        def chat_json(self, messages, model, agent, **_):
+            self.models.append(model)
+            if model == "fast-model":
+                return {"hypothesis": "a is overloaded", "confidence": 0.6, "origin_service": "a"}
+            assert "first guess" in messages[1]["content"]
+            return {"action": "conclude", "root_cause": "a is overloaded, confirmed", "confidence": 0.9}
+
+    ow.investigator.llm = Both()
+    set_value("a", 50)
+    inc = ow.handle(ow.watcher.run())
+    assert ow.investigator.llm.models == ["fast-model", "m"]
+    assert inc.hypothesis["text"] == "a is overloaded" and inc.root_cause.endswith("confirmed")
+    ow.stop()
+
+
+def test_pushed_alerts_open_incidents_that_a_person_closes(world):
+    make, _ = world
+    ow = make()
+    inc = ow.ingest_alert("alertmanager", "a", "HighLatency", "p99 above 2s")
+    assert inc.anomalies[0].check == "alert:alertmanager:HighLatency"
+    assert wait_for(lambda: inc.status == "awaiting_approval")
+    ow.check_once()
+    assert inc.recovered_at is None  # no check behind it: never auto-recovers
+    with TestClient(create_app(ow, watch=False)) as c:
+        r = c.post("/api/ingest", json={"alerts": [{"status": "firing", "labels": {"alertname": "Down", "service": "b"}}]})
+        assert r.status_code == 200 and r.json()["incidents"] == [inc.id]  # merged into the open incident
+    ow.stop()
+
+
+def test_a_quick_restart_is_not_an_outage(world):
+    make, _ = world
+    ow = make(event_grace_seconds=0.3)
+    ow.on_container_event("down", "a", "a-1", "container a-1 exited (exit code 0)")
+    assert "a-1" in ow.status()["down"]  # shown on the map at once
+    ow.on_container_event("up", "a", "a-1", "container a-1 started")
+    time.sleep(0.5)
+    assert ow.incidents == {} and ow.status()["down"] == {}
+    ow.on_container_event("down", "a", "a-1", "container a-1 exited (exit code 137)")
+    assert wait_for(lambda: len(ow.incidents) == 1)  # stayed down past the grace period
+    ow.stop()
+
+
+def test_timeline_reaches_the_model_and_pack_rows_get_minutes_before_start(world):
+    from overwatch.config import EvidenceConfig
+
+    make, set_value = world
+    ow = make(evidence=[EvidenceConfig("changes", "Changes", "db", "SELECT '2026-01-01T00:00:00+00:00' AS ts, 'x' AS name")])
+    seen = []
+    original = ow.investigator.llm.chat_json
+    ow.investigator.llm.chat_json = lambda m, model, agent, **k: seen.append(m) or original(m, model, agent)
+    ow.watcher.history["a_high"].extend((time.time() - 600 + i * 30, 1.0) for i in range(15))  # 10 min of normal
+    set_value("a", 50)
+    inc = ow.handle(ow.watcher.run())
+    prompt = seen[0][1]["content"]
+    assert "Incident timeline" in prompt and "The problem started at" in prompt
+    assert "a_high [a]: normal 1 -> now 50 (FIRING)" in prompt
+    assert inc.started_at and inc.pack[0].rows[0]["minutes_before_start"] > 0
     ow.stop()

@@ -35,6 +35,11 @@ export function StatusBanner() {
     tone = "bad";
     title = "Overwatch can't read the monitoring data";
     detail = "Every check is failing to run. The database or the data source may be down.";
+  } else if (focus?.status === "investigating" && focus.hypothesis && "text" in focus.hypothesis) {
+    tone = "warn";
+    title = `Likely: ${firstSentence(focus.hypothesis.text)}`;
+    detail = `First guess (${Math.round(focus.hypothesis.confidence * 100)}% sure, ${focus.hypothesis.seconds}s) · ${currentActivity(events, focus)}`;
+    action = { label: "Show it" };
   } else if (focus?.status === "investigating") {
     tone = "warn";
     title = `${incidentHeadline(focus)}: investigating`;

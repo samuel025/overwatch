@@ -39,7 +39,7 @@ class ScriptedLLM:
         self.replies = [json.dumps(r) for r in replies]
         self.prompts: list[list[dict]] = []
 
-    def chat_json(self, messages, model, agent):
+    def chat_json(self, messages, model, agent, **_):
         self.prompts.append(list(messages))
         return extract_json(self.replies.pop(0))
 
@@ -110,6 +110,36 @@ def test_watcher_no_data_alerts_only_when_configured():
     assert [a.check for a in found] == ["silent"] and found[0].comparison == "no_data"
 
 
+def test_watcher_suspects_first_and_confirms_on_the_second_pass():
+    src = FakeSource({"latency": [{"value": 900}]})
+    w = Watcher([CheckConfig("lat", "db", "select latency", 500, service="orders")], {"db": src}, confirm_samples=2)
+    assert w.run() == [] and w.suspected == {"lat"}  # one bad sample: shown, not paged
+    [a] = w.run()
+    assert a.check == "lat" and w.suspected == set()
+    src.answers = {"latency": [{"value": 10}]}
+    assert w.run() == [] and w.suspected == set() and w.streak["lat"] == 0
+
+
+def test_probe_check_calls_the_health_url(monkeypatch):
+    import httpx as _httpx
+
+    class R:
+        status_code = 200
+
+    calls = []
+    monkeypatch.setattr(_httpx, "get", lambda url, timeout: calls.append(url) or R())
+    probe = CheckConfig("orders_up", kind="probe", url="http://orders/health", threshold=1, comparison="<", service="orders")
+    w = Watcher([probe], {})
+    assert w.run() == [] and calls == ["http://orders/health"]
+
+    def down(url, timeout):
+        raise _httpx.ConnectError("refused")
+
+    monkeypatch.setattr(_httpx, "get", down)
+    [a] = w.run()
+    assert a.value == 0 and a.service == "orders"
+
+
 def test_investigator_loop_collects_evidence_and_concludes():
     src = FakeSource({"request_metrics": [{"p95": 1700}], "deploys": [{"version": "v1.8.0"}]})
     llm = ScriptedLLM([
@@ -117,7 +147,8 @@ def test_investigator_loop_collects_evidence_and_concludes():
         {"thought": "typo", "action": "query", "source": "nope", "query": "select 1", "purpose": "bad source"},
         {"thought": "deploys?", "action": "query", "source": "db", "query": "select * from deploys", "purpose": "recent deploys"},
         {"thought": "done", "action": "conclude", "root_cause": "v1.8.0 dropped an index", "confidence": 0.9,
-         "severity": "high", "evidence_steps": [1, 3], "memory_used": ["mem-1"], "recommended_actions": ["recreate index"]},
+         "severity": "high", "memory_used": ["mem-1"], "recommended_actions": ["recreate index"],
+         "evidence": [{"step": 1, "quote": "1700", "shows": "slow"}, {"step": 3, "quote": "v1.8.0", "shows": "deploy"}]},
     ])
     inc = Incident(anomalies=[Anomaly("lat", "orders", 1700, 250, ">", "p95")])
     inc.similar_incidents = [{"id": "mem-1", "content": "index dropped before", "relevance": 0.6}]
@@ -213,3 +244,97 @@ def test_watcher_relative_check_compares_to_its_own_normal():
     assert a.comparison == "x_normal" and a.threshold == 48 and "6.2x" in a.description
     src.answers = {"lat": [{"value": 20}]}
     assert w.run() == []  # below relative_min: never alert on tiny absolute numbers
+
+
+def _grounded_incident(root_cause, cited, rows=None):
+    from overwatch.models import Evidence
+
+    inc = Incident(anomalies=[Anomaly("lat", "orders", 900, 250, ">", "p95")], root_cause=root_cause)
+    inc.evidence = [Evidence("db", "select 1", rows or [{"instance": "orders", "status": "exited", "exit_code": 0}])]
+    inc.cited = cited
+    return inc
+
+
+def test_grounding_verifies_quotes_against_the_cited_step():
+    from overwatch import grounding
+
+    inc = _grounded_incident("The orders container exited.", [
+        {"step": 1, "quote": "exited"}, {"step": 1, "quote": "0"}, {"step": 1, "quote": "running"}])
+    g = grounding.check(inc, "system description")
+    assert g["verified"] == 2 and g["total"] == 3 and g["unverified"] == [{"step": 1, "quote": "running"}]
+
+
+def test_grounding_flags_infrastructure_the_data_never_mentioned():
+    from overwatch import grounding
+
+    inc = _grounded_incident(
+        "Orders v1.9.0 failed its liveness probe, so Kubernetes restarted the pod.",
+        [{"step": 1, "quote": "exited"}])
+    g = grounding.check(inc, "orders runs on Docker Compose")
+    assert "Kubernetes" in g["unsupported_terms"] and "v1.9.0" in g["unsupported_terms"]
+    assert not g["ok"]
+
+
+def test_well_grounded_conclusion_keeps_its_confidence_and_badly_grounded_is_capped():
+    src = FakeSource({"containers": [{"instance": "orders", "status": "exited"}]})
+    q = {"action": "query", "source": "db", "query": "select * from containers", "purpose": "state"}
+    good = {"action": "conclude", "root_cause": "The orders container exited.", "confidence": 0.9,
+            "evidence": [{"step": 1, "quote": "exited"}]}
+    bad = {"action": "conclude", "root_cause": "A Kubernetes liveness probe killed orders.", "confidence": 0.9,
+           "evidence": [{"step": 1, "quote": "probe failed"}]}
+    for reply, expected in ((good, 0.9), (bad, 0.6)):
+        inc = Incident(anomalies=[Anomaly("c", "orders", 1, 0, ">", "")])
+        Investigator(make_config(), ScriptedLLM([q, reply]), {"db": src}).investigate(inc)
+        assert inc.confidence == expected, (reply["root_cause"], inc.grounding)
+
+
+def test_disagreeing_with_the_first_guess_without_a_reason_lowers_confidence():
+    src = FakeSource({"x": [{"state": "exited"}]})
+    reply = {"action": "conclude", "root_cause": "orders exited", "confidence": 0.9,
+             "evidence": [{"step": 0, "quote": "exited"}], "first_guess": {"verdict": "disagree", "why": ""}}
+    inc = Incident(anomalies=[Anomaly("c", "orders", 1, 0, ">", "")])
+    from overwatch.models import Evidence
+
+    inc.pack = [Evidence("db", "select x", [{"state": "exited"}], note="[pack] state")]
+    inc.hypothesis = {"text": "orders is slow", "confidence": 0.7}
+    Investigator(make_config(), ScriptedLLM([reply]), {"db": src}).investigate(inc)
+    assert inc.confidence == 0.5 and "competing explanations" in inc.reasoning[-1]
+
+
+def test_grounding_accepts_key_value_quotes_of_real_rows():
+    from overwatch import grounding
+
+    inc = _grounded_incident("orders exited.", [
+        {"step": 1, "quote": "ts: 2026-10-23T08:39:39.671804, requests: 145, rps: 14.5, error_rate: 0.0"},
+        {"step": 1, "quote": "requests: 999, rps: 99.9"}],
+        rows=[{"ts": "2026-10-23T08:39:39.671804+00:00", "requests": 145, "rps": 14.5, "error_rate": 0.0}])
+    g = grounding.check(inc, "")
+    assert g["verified"] == 1 and g["unverified"][0]["quote"].startswith("requests: 999")
+
+
+def test_grounding_counts_the_timeline_as_step_zero():
+    from overwatch import grounding
+
+    inc = _grounded_incident("orders stopped at 08:39:45 UTC.", [{"step": 0, "quote": "container orders exited (exit code 0)"}])
+    g = grounding.check(inc, "- Pushed event at 08:39:45 UTC: container orders exited (exit code 0) at 08:39:45 UTC")
+    assert g["verified"] == 1 and g["unsupported_terms"] == []
+
+
+def test_grounding_handles_empty_results_prose_around_values_and_ordinary_hyphenated_words():
+    from overwatch import grounding
+    from overwatch.models import Evidence
+
+    inc = _grounded_incident("No host-level event stopped payments-b or config-99.", [
+        {"step": 1, "quote": "0 rows"},
+        {"step": 2, "quote": "error_rate: 0.8102189781021898 at 08:47:45, then 1.0 thereafter"},
+        {"step": 3, "quote": 'service: "orders", status: "exited" while gateway, payments-a all "running"'}])
+    inc.evidence = [
+        Evidence("db", "q1", []),
+        Evidence("db", "q2", [{"ts": "2026-10-23T08:47:45+00:00", "error_rate": 0.8102189781021898},
+                              {"ts": "2026-10-23T08:47:55+00:00", "error_rate": 1.0}]),
+        Evidence("db", "q3", [{"service": "orders", "status": "exited"}, {"service": "gateway", "status": "running"},
+                              {"service": "payments-a", "status": "running"}]),
+    ]
+    g = grounding.check(inc, "payments-b")
+    assert g["verified"] == 3, g["unverified"]
+    assert g["unsupported_terms"] == ["config-99"]  # "host-level" is English; config-99 is an id not in the data

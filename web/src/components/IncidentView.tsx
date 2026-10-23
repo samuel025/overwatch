@@ -24,7 +24,16 @@ const STATUS_CHIP: Record<Incident["status"], { label: string; tone: string }> =
 };
 
 /** Steps from the live event stream, or from the stored evidence for incidents loaded from history. */
-function buildStory(events: OwEvent[], incident: Incident): { memories: Memory[] | null; steps: Step[]; thinking: number | null } {
+interface PackItem { label: string; source: string; sql: string; done: boolean; error: string | null; rows: Row[]; count: number; ms: number }
+
+function packFromIncident(incident: Incident): PackItem[] {
+  return (incident.pack ?? []).map((ev) => ({
+    label: ev.note.replace(/^\[pack\] /, ""), source: ev.source, sql: ev.query, done: true, error: ev.error,
+    rows: ev.rows.slice(0, 5), count: ev.rows.length, ms: ev.ms,
+  }));
+}
+
+function buildStory(events: OwEvent[], incident: Incident): { memories: Memory[] | null; steps: Step[]; thinking: number | null; pack: PackItem[] } {
   const mine = eventsFor(events, incident.id);
   const used = new Set(incident.similar_incidents.filter((m) => m.used).map((m) => m.id));
   const keyNotes = incident.evidence.map((e) => e.note.startsWith("[key] "));
@@ -39,14 +48,25 @@ function buildStory(events: OwEvent[], incident: Incident): { memories: Memory[]
         error: ev.error, rows: ev.rows.slice(0, 5), count: ev.rows.length, ms: ev.ms,
       },
     }));
-    return { memories: memories.length || incident.status !== "investigating" ? memories : null, steps, thinking: null };
+    return { memories: memories.length || incident.status !== "investigating" ? memories : null, steps, thinking: null, pack: packFromIncident(incident) };
   }
 
   let memories: Memory[] | null = null;
   const steps = new Map<number, Step>();
   let thinking: number | null = null;
   let q = 0;
+  const pack = new Map<string, PackItem>();
   for (const e of mine) {
+    if ((e.type === "query.started" || e.type === "query.finished") && e.step === 0) {
+      const label = (e.type === "query.started" ? e.purpose : e.purpose) || e.source;
+      if (e.type === "query.started") pack.set(label, { label, source: e.source, sql: e.query, done: false, error: null, rows: [], count: 0, ms: 0 });
+      else {
+        const p = pack.get(label);
+        if (p) Object.assign(p, { done: true, error: e.error, rows: e.rows, count: e.row_count, ms: e.ms });
+      }
+      continue;
+    }
+    if (e.type === "agent.thinking" && e.step === 0) continue;
     if (e.type === "memory.recalled") {
       memories = e.memories.filter((m) => m.id !== "-").map((m) => ({ ...m, used: used.has(m.id) }));
     } else if (e.type === "agent.thinking") {
@@ -63,7 +83,12 @@ function buildStory(events: OwEvent[], incident: Incident): { memories: Memory[]
       if (s?.query) Object.assign(s.query, { done: true, error: e.error, rows: e.rows, count: e.row_count, ms: e.ms });
     }
   }
-  return { memories, steps: [...steps.values()].sort((a, b) => a.step - b.step), thinking: incident.status === "investigating" ? thinking : null };
+  return {
+    memories,
+    steps: [...steps.values()].sort((a, b) => a.step - b.step),
+    thinking: incident.status === "investigating" ? thinking : null,
+    pack: pack.size ? [...pack.values()] : packFromIncident(incident),
+  };
 }
 
 function ResultTable({ rows }: { rows: Row[] }) {
@@ -134,12 +159,82 @@ function Detected({ incident }: { incident: Incident }) {
         let text: React.ReactNode;
         if (a.check === "manual_report") text = <>Someone reported: <b>“{a.description}”</b></>;
         else if (a.comparison === "no_data") text = <><b>{name}</b>: no data (the service went silent)</>;
+        else if (a.comparison === "event") text = <><b>{a.service}</b>: {a.description.replace(/^container \S+ /, "container ")}</>;
+        else if (a.comparison === "alert") text = <>Alert from {a.check.split(":")[1]}: <b>{a.check.split(":").slice(2).join(":")}</b>{a.description && ` (${a.description})`}</>;
         else if (a.comparison === "error") text = <><b>{name}</b> could not be checked</>;
         else if (a.comparison === "x_normal") text = <><b>{name}</b> was {fmt(a.value)}, {a.description.split(" over")[0]}</>;
         else text = <><b>{name}</b> was {fmt(a.value)} (limit {a.comparison} {fmt(a.threshold)})</>;
         return <li key={a.check}>{text}</li>;
       })}
     </ul>
+  );
+}
+
+function Grounding({ incident }: { incident: Incident }) {
+  const g = incident.grounding;
+  if (!g || g.total === undefined) return null;
+  const terms = g.unsupported_terms ?? [];
+  return (
+    <div className={clsx("grounding", g.ok ? "grounding-ok" : "grounding-warn")}>
+      {g.ok ? "✓" : "⚠"} Evidence check: {g.verified}/{g.total} quotes found in the data
+      {terms.length > 0 && <> · not in the data: <b>{terms.join(", ")}</b></>}
+      {!g.ok && <span className="muted"> · confidence limited</span>}
+    </div>
+  );
+}
+
+function FirstGuessVerdict({ incident }: { incident: Incident }) {
+  const v = incident.first_guess_verdict;
+  if (!v?.verdict || v.verdict === "none" || !("text" in incident.hypothesis)) return null;
+  return (
+    <p className="small first-guess-verdict">
+      {v.verdict === "agree" ? "Agrees with the first guess" : "Differs from the first guess"}
+      {v.why && `: ${v.why}`}
+    </p>
+  );
+}
+
+function Reasoning({ incident }: { incident: Incident }) {
+  const unverified = new Set((incident.grounding?.unverified ?? []).map((u) => `${u.step}|${u.quote}`));
+  if (!incident.hypotheses?.length && !incident.cited?.length) return null;
+  return (
+    <div className="reasoning-grid">
+      {incident.hypotheses?.length > 0 && (
+        <div className="summary-block">
+          <h3>Explanations considered</h3>
+          <ul className="hypotheses">
+            {incident.hypotheses.map((h, i) => (
+              <li key={i}>
+                <span className={clsx("verdict", `verdict-${h.verdict.replace(/\s+/g, "-")}`)}>{h.verdict}</span>
+                <span>
+                  <b>{h.cause}</b>
+                  {h.why && <span className="muted"> · {h.why}</span>}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {incident.cited?.length > 0 && (
+        <div className="summary-block">
+          <h3>Evidence it relied on</h3>
+          <ul className="cited">
+            {incident.cited.map((c, i) => {
+              const bad = unverified.has(`${c.step}|${c.quote}`);
+              return (
+                <li key={i} className={clsx(bad && "cited-bad")} title={bad ? "Not found in that step's result" : "Found in the data"}>
+                  <span className="cited-mark">{bad ? "⚠" : "✓"}</span>
+                  <span>
+                    <code>{c.quote}</code>
+                    <span className="muted small"> · {c.step === 0 ? "evidence pack" : `step ${c.step}`}{c.shows && ` · ${c.shows}`}</span>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -179,7 +274,8 @@ function Decision({ incident }: { incident: Incident }) {
 
 function Story({ incident }: { incident: Incident }) {
   const events = useStore((s) => s.events);
-  const { memories, steps, thinking } = buildStory(events, incident);
+  const { memories, steps, thinking, pack } = buildStory(events, incident);
+  const guess = incident.hypothesis && "text" in incident.hypothesis ? incident.hypothesis : null;
   const live = incident.status === "investigating";
   return (
     <details className="story" open={live}>
@@ -188,6 +284,26 @@ function Story({ incident }: { incident: Incident }) {
         <span className="muted"> · {steps.length} {steps.length === 1 ? "step" : "steps"}</span>
       </summary>
       <ol className="story-list">
+        {pack.length > 0 && (
+          <li className="story-item story-pack">
+            <div className="story-who">Evidence pack · gathered automatically, in parallel</div>
+            <ul className="pack-list">
+              {pack.map((p) => (
+                <li key={p.label}>
+                  <span>{p.label}</span>
+                  <span className="muted small">
+                    {!p.done ? <span className="shimmer">running…</span> : p.error ? <span className="err">failed</span> : `${p.count} rows · ${p.ms} ms`}
+                  </span>
+                  <details className="query-details">
+                    <summary>Show</summary>
+                    <pre className="sql">{p.sql.trim()}</pre>
+                    <ResultTable rows={p.rows} />
+                  </details>
+                </li>
+              ))}
+            </ul>
+          </li>
+        )}
         {memories && (
           <li className="story-item story-memory">
             <div className="story-who">Historian</div>
@@ -208,6 +324,15 @@ function Story({ incident }: { incident: Incident }) {
                 ))}
               </ul>
             )}
+          </li>
+        )}
+        {guess && (
+          <li className="story-item story-guess">
+            <div className="story-who">Fast first guess · {guess.model.replace(/^nvidia\//, "")} · {guess.seconds}s</div>
+            <p>{guess.text}</p>
+            <span className="muted small">
+              {Math.round(guess.confidence * 100)}% sure{guess.check_next && ` · to confirm: ${guess.check_next}`}
+            </span>
           </li>
         )}
         {steps.map((s) => (
@@ -274,7 +399,17 @@ export function IncidentView({ incident }: { incident: Incident }) {
         <div className="summary-block summary-why">
           <h3>Why</h3>
           {incident.status === "investigating" ? (
-            <p className="shimmer">{currentActivity(events, incident)}…</p>
+            incident.hypothesis && "text" in incident.hypothesis ? (
+              <>
+                <p className="root-cause guess">{incident.hypothesis.text}</p>
+                <p className="small muted">
+                  First guess from the fast model, {Math.round(incident.hypothesis.confidence * 100)}% sure.{" "}
+                  <span className="shimmer">{currentActivity(events, incident)}…</span>
+                </p>
+              </>
+            ) : (
+              <p className="shimmer">{currentActivity(events, incident)}…</p>
+            )
           ) : failed ? (
             <p className="err">{incident.root_cause.replace(/^Investigation failed: /, "The investigation could not finish: ")}</p>
           ) : (
@@ -284,6 +419,8 @@ export function IncidentView({ incident }: { incident: Incident }) {
                 <span className="confidence-bar"><span style={{ transform: `scaleX(${incident.confidence})` }} /></span>
                 {Math.round(incident.confidence * 100)}% sure
               </div>
+              <Grounding incident={incident} />
+              <FirstGuessVerdict incident={incident} />
             </>
           )}
         </div>
@@ -300,6 +437,8 @@ export function IncidentView({ incident }: { incident: Incident }) {
           )}
         </div>
       </div>
+
+      <Reasoning incident={incident} />
 
       {incident.status === "awaiting_approval" && <Decision incident={incident} />}
       {!incident.recovered_at && incident.status !== "investigating" && incident.status !== "dismissed" && (

@@ -63,6 +63,13 @@ class Incident:
     origin_service: str | None = None
     blast_radius: dict[str, Any] = field(default_factory=dict)
     recovered_at: str | None = None  # set when every check behind it has been healthy for a while
+    pack: list[Evidence] = field(default_factory=list)  # evidence gathered automatically at the start
+    hypothesis: dict[str, Any] = field(default_factory=dict)  # the fast model's first guess
+    started_at: float | None = None  # when the problem began (first breaching sample), unix time
+    hypotheses: list[dict[str, Any]] = field(default_factory=list)  # explanations considered, with verdicts
+    cited: list[dict[str, Any]] = field(default_factory=list)  # evidence quotes the conclusion relies on
+    first_guess_verdict: dict[str, Any] = field(default_factory=dict)  # agree/disagree with the first guess
+    grounding: dict[str, Any] = field(default_factory=dict)  # mechanical check of the conclusion against data
 
     @property
     def services(self) -> list[str]:
@@ -86,4 +93,5 @@ class Incident:
         data = {k: v for k, v in d.items() if k in known}
         data["anomalies"] = [Anomaly(**a) for a in d.get("anomalies", [])]
         data["evidence"] = [Evidence(**e) for e in d.get("evidence", [])]
+        data["pack"] = [Evidence(**e) for e in d.get("pack", [])]
         return cls(**data)

@@ -57,7 +57,7 @@ function NodeCard({ name, h, x, y }: { name: string; h: NodeHealth; x: number; y
       </div>
       <div className="node-metrics">
         {h.state === "down"
-          ? "No data reported"
+          ? h.problems[0]?.replace(/^container \S+ /, "") ?? "No data reported"
           : h.metrics.map((m) => (
               <span key={m.label} className={clsx(m.bad && "node-metric-bad")}>
                 {m.label} <b>{m.value}</b>
@@ -71,12 +71,13 @@ function NodeCard({ name, h, x, y }: { name: string; h: NodeHealth; x: number; y
 export function SystemMap({ blast }: { blast?: BlastRadius | null }) {
   const topology = useStore((s) => s.status?.topology);
   const checks = useStore((s) => s.checks);
+  const down = useStore((s) => s.down);
   if (!topology || !Object.keys(topology).length) {
     return <p className="empty">Add a <code>topology:</code> section to overwatch.yaml to see the system map.</p>;
   }
 
   const { pos, width, height } = layout(topology);
-  const health = new Map([...pos.keys()].map((n) => [n, nodeHealth(n, checks, blast)]));
+  const health = new Map([...pos.keys()].map((n) => [n, nodeHealth(n, checks, blast, down)]));
   const hot = new Set((blast?.edges ?? []).map((e) => `${e.from}>${e.to}`));
   const broken = (n: string) => ["down", "degraded"].includes(health.get(n)!.state);
 
@@ -117,6 +118,7 @@ export function MapLegend() {
   return (
     <div className="map-legend">
       <span><i className="lg lg-healthy" /> Healthy</span>
+      <span><i className="lg lg-suspected" /> Possible problem</span>
       <span><i className="lg lg-degraded" /> Having problems</span>
       <span><i className="lg lg-down" /> Not responding</span>
       <span><i className="lg lg-risk" /> At risk</span>

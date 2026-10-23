@@ -93,11 +93,17 @@ export function Signals() {
         <div key={service} className="signal-group">
           <div className="signal-service">{service}</div>
           {list.map((c) => (
-            <div key={c.name} className={clsx("signal-row", c.failing && "signal-row-bad")} title={c.description}>
+            <div
+              key={c.name}
+              className={clsx("signal-row", c.failing && "signal-row-bad", c.suspected && "signal-row-suspected")}
+              title={c.description}
+            >
               <span className="signal-label">{humanize(c.name).replace(new RegExp(`^${service}\\s*`, "i"), "") || c.name}</span>
               <Sparkline check={c} />
               <span className="signal-value">
-                {c.kind === "heartbeat" ? (c.failing ? "silent" : "ok") : formatCheckValue(c, c.value)}
+                {c.kind === "heartbeat" ? (c.failing ? "silent" : "ok")
+                  : c.kind === "probe" ? (c.value === 1 ? "up" : c.value === 0 ? "down" : "n/a")
+                    : formatCheckValue(c, c.value)}
               </span>
             </div>
           ))}

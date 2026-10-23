@@ -47,11 +47,11 @@ class LLM:
                 "Is Nightshift running?"
             ) from e
 
-    def chat(self, messages: list[dict[str, str]], model: str, agent: str) -> str:
+    def chat(self, messages: list[dict[str, str]], model: str, agent: str, extra_body: dict | None = None) -> str:
         start = time.monotonic()
         try:
             resp = self.client.chat.completions.create(
-                model=model, messages=messages, temperature=self.cfg.temperature
+                model=model, messages=messages, temperature=self.cfg.temperature, extra_body=extra_body or None
             )
         except Exception as e:
             raise LLMError(f"model call failed ({model}): {e}") from e
@@ -59,11 +59,13 @@ class LLM:
         self._trace(agent, model, messages, content, time.monotonic() - start, resp.usage)
         return content
 
-    def chat_json(self, messages: list[dict[str, str]], model: str, agent: str, retries: int = 2) -> dict[str, Any]:
+    def chat_json(
+        self, messages: list[dict[str, str]], model: str, agent: str, retries: int = 2, extra_body: dict | None = None
+    ) -> dict[str, Any]:
         """Ask for a JSON object; on unparseable output, tell the model and retry."""
         msgs = list(messages)
         for _ in range(retries + 1):
-            raw = self.chat(msgs, model, agent)
+            raw = self.chat(msgs, model, agent, extra_body=extra_body)
             parsed = extract_json(raw)
             if parsed is not None:
                 return parsed

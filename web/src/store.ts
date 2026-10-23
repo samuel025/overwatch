@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AgentName, AgentState, Check, Incident, MemoryOverview, OwEvent, Status } from "./types";
+import type { AgentName, AgentState, Check, DownMap, Incident, MemoryOverview, OwEvent, Status } from "./types";
 
 type Point = { time: number; value: number };
 type LlmCall = Extract<OwEvent, { type: "llm.call" }>;
@@ -17,6 +17,7 @@ interface Store {
   events: OwEvent[];
   llmCalls: LlmCall[];
   memory: MemoryOverview | null;
+  down: DownMap;
   hydrate: (s: Status) => void;
   apply: (e: OwEvent) => void;
   select: (id: string) => void;
@@ -45,6 +46,7 @@ export const useStore = create<Store>((set) => ({
   events: [],
   llmCalls: [],
   memory: null,
+  down: {},
 
   hydrate: (s) =>
     set((state) => {
@@ -56,6 +58,7 @@ export const useStore = create<Store>((set) => ({
       const order = s.incidents.map((i) => i.id);
       return {
         status: s,
+        down: s.down ?? {},
         events: [], // the SSE backlog replays right after a (re)connect
         llmCalls: [],
         checks: s.checks,
@@ -81,8 +84,11 @@ export const useStore = create<Store>((set) => ({
             history[name] = [...prev.filter((p) => p.time > cutoff), { time: e.ts, value }];
           }
           const failing = new Set(e.failing);
+          const suspected = new Set(e.suspected ?? []);
           const checks = state.checks.map((c) =>
-            c.name in e.values ? { ...c, value: e.values[c.name], failing: failing.has(c.name) } : c,
+            c.name in e.values
+              ? { ...c, value: e.values[c.name], failing: failing.has(c.name), suspected: suspected.has(c.name) }
+              : c,
           );
           return { events, history, checks, lastTick: e.ts };
         }
@@ -94,6 +100,19 @@ export const useStore = create<Store>((set) => ({
           };
         case "incident.updated":
           return { events, ...upsert(state, e.incident) };
+        case "service.event": {
+          const down = { ...state.down };
+          if (e.state === "down") down[e.instance] = { service: e.service, since: e.ts, detail: e.detail };
+          else delete down[e.instance];
+          return { events, down };
+        }
+        case "investigator.hypothesis": {
+          const inc = state.incidents[e.incident];
+          if (!inc) return { events };
+          const { text, confidence, origin_service, check_next, model, seconds } = e;
+          const hypothesis = { text, confidence, origin_service, check_next, model, seconds };
+          return { events, incidents: { ...state.incidents, [inc.id]: { ...inc, hypothesis } } };
+        }
         case "blast_radius.updated": {
           const inc = state.incidents[e.incident];
           if (!inc) return { events };
@@ -130,7 +149,8 @@ export function agentStates(events: OwEvent[], incident: Incident | undefined, l
         states.watcher = "done";
         break;
       case "agent.working":
-        states[e.agent] = "working";
+        if (e.agent === "evidence") states.investigator = "working";
+        else states[e.agent] = "working";
         break;
       case "memory.recalled":
         states.historian = "done";
