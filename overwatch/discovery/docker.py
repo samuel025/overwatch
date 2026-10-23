@@ -7,6 +7,8 @@ from typing import Any
 import httpx
 
 from ..docker_api import COMPOSE_SERVICE, DockerAPI, DockerError, depends_on
+from .externals import hosts_in_env, hosts_in_text
+from ..sources.docker import _ERRORISH
 
 # Recognised images: what they are, so the draft service knowledge is not empty.
 KNOWN_IMAGES = {
@@ -61,12 +63,25 @@ def discover_docker(project: str | None, service_label: str = COMPOSE_SERVICE, s
     topology: dict[str, set[str]] = {}
     checks: list[dict[str, Any]] = []
     notes: list[str] = []
+    env_hits: dict[str, dict[str, str]] = {}
+    log_hits: dict[str, dict[str, int]] = {}
+    internal: set[str] = set()
     for c in containers:
         name = c["Labels"].get(service_label)
         if not name:
             continue
         info = api.inspect(c["Id"])
         host = info["HostConfig"]
+        internal |= {name, c["Labels"].get(COMPOSE_SERVICE, ""), info["Config"].get("Hostname", "")}
+        internal |= {n.lstrip("/") for n in c.get("Names", [])}
+        env_hits.setdefault(name, {}).update(hosts_in_env(info["Config"].get("Env") or []))
+        if c.get("State") == "running":
+            try:
+                errors = [line for _, line in api.logs(c["Id"], tail=300) if _ERRORISH.search(line)]
+                for h, n in hosts_in_text(errors).items():
+                    log_hits.setdefault(name, {})[h] = log_hits.get(name, {}).get(h, 0) + n
+            except DockerError:
+                pass
         svc = services.setdefault(name, {
             "image": c.get("Image", ""), "instances": 0, "databases": False,
             "cpu_limit": (host.get("NanoCpus") or 0) / 1e9 or None,
@@ -129,4 +144,7 @@ def discover_docker(project: str | None, service_label: str = COMPOSE_SERVICE, s
         "runtime_facts": runtime_facts,
         "notes": notes,
         "databases": [n for n, s in services.items() if s["databases"]],
+        "env_hits": env_hits,
+        "log_hits": log_hits,
+        "internal": sorted(h.lower() for h in internal if h),
     }

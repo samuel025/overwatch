@@ -7,6 +7,8 @@ from typing import Any
 
 from sqlalchemy import create_engine, inspect, text
 
+from .externals import hosts_in_text
+
 TS_TYPES = ("timestamp", "datetime", "date")
 LATENCY = re.compile(r"(p9\d|latency|duration|response_time).*?(_ms|_seconds|_s)?$")
 ERRORS = re.compile(r"error_?rate|errors?_?(pct|ratio)?$|failure_rate")
@@ -61,7 +63,7 @@ def discover_sql(name: str, url: str, max_tables: int = 40) -> dict[str, Any]:
             if "service" in names and ({"version"} & names or {"description"} & names) and "message" not in names:
                 roles.setdefault("changes", {"table": t["name"], "ts": ts})
             elif {"level", "message"} <= names or ({"severity", "message"} <= names):
-                roles.setdefault("logs", {"table": t["name"], "ts": ts,
+                roles.setdefault("logs", {"table": t["name"], "ts": ts, "service": "service" if "service" in names else None,
                                           "level": "level" if "level" in names else "severity"})
             elif "service" in names:
                 latency = next((c["name"] for c in t["columns"] if LATENCY.search(c["name"])), None)
@@ -72,6 +74,20 @@ def discover_sql(name: str, url: str, max_tables: int = 40) -> dict[str, Any]:
                         if dialect == "postgresql" else f"SELECT DISTINCT service FROM {t['name']} LIMIT 20"))]
                     roles.setdefault("metrics", {"table": t["name"], "ts": ts, "latency": latency,
                                                  "errors": errors, "services": [s for s in services if s]})
+
+        log_hits: dict[str, dict[str, int]] = {}
+        if lg := roles.get("logs"):  # which hosts do recent errors name? (external dependency clues)
+            svc_col = lg["service"] or "''"
+            recent = "now() - interval '1 hour'" if dialect == "postgresql" else "datetime('now', '-1 hour')"
+            try:
+                rows = conn.execute(text(
+                    f"SELECT {svc_col}, message FROM {lg['table']} WHERE upper({lg['level']}) IN ('ERROR', 'FATAL', "
+                    f"'CRITICAL') AND {lg['ts']} > {recent} LIMIT 2000")).fetchall()
+            except Exception:
+                rows = []
+            for service, message in rows:
+                for h, n in hosts_in_text([str(message)]).items():
+                    log_hits.setdefault(service or "", {})[h] = log_hits.get(service or "", {}).get(h, 0) + n
     engine.dispose()
 
     # Catalog text for the Investigator.
@@ -149,4 +165,6 @@ def discover_sql(name: str, url: str, max_tables: int = 40) -> dict[str, Any]:
         "name": name, "dialect": dialect, "tables": [t["name"] for t in tables], "catalog": "\n".join(lines),
         "roles": {k: v.get("table") for k, v in roles.items()}, "checks": checks, "evidence": evidence, "notes": notes,
         "services": roles.get("metrics", {}).get("services", []),
+        "logs": roles.get("logs"),
+        "log_hits": log_hits,
     }

@@ -308,7 +308,22 @@ overwatch run
 
 Latency checks use **compare-to-normal** (4× the service's own recent median), so nobody has to guess a threshold. Database addresses with passwords and the AI key go into `.env`, never into `overwatch.yaml`.
 
-Discovery cannot see external services (a third-party API your code calls) or what each service is *for*: add those to `topology:` and `services:` yourself. Kubernetes discovery is not supported yet.
+### External services
+
+Third-party APIs and managed services (a payment provider, email, a hosted database) are invisible to Docker, so discovery looks for two clues:
+
+- **Your services' settings:** addresses in container environment variables (`PAYMENT_API_URL=https://api.stripe.com`, `SMTP_HOST=smtp.sendgrid.net`). Only the hostname is kept; the value (which can contain credentials) is never stored or shown. Your own containers, cluster-internal names and raw IPs are ignored.
+- **Your error logs:** hosts named in recent errors (`POST https://psp.example.com/v1/charge returned 429`), from Docker logs or a logs table.
+
+Each one is suggested with the evidence ("payments has it in the PROVIDER_URL setting") and the services that call it. On the setup page you can accept, rename or drop suggestions, add any that were missed, and give each one:
+
+- **who calls it**: adds it to the topology, so the map and blast radius include it;
+- **a health or status URL** (optional): becomes a probe, so Overwatch can tell "it's them" from "it's us";
+- **text that appears in your error logs when it fails** (optional): becomes a check ("more than 5 such errors in 2 minutes") on the logs table, or on Docker logs (`count <callers> 2 <text>`).
+
+In the demo shop, payments reaches the card processor through `PROVIDER_URL=http://psp.example.com:8000/psp`, so discovery finds `psp.example.com` on its own.
+
+Discovery still cannot know what each service is *for*: fill in the one-line descriptions. Kubernetes discovery is not supported yet.
 
 ### Built in, no setup needed
 
@@ -759,7 +774,7 @@ Run them with the project's Python (`../../../.venv/bin/python` from `scripts/`)
 ### Automated tests
 
 ```bash
-pytest                                       # 90 offline tests: no database, AI or memory service needed
+pytest                                       # 93 offline tests: no database, AI or memory service needed
 cd memory-service && npm run conformance     # official H-MEM conformance suite
 ```
 

@@ -54,9 +54,12 @@ class DockerAPI:
     def projects(self) -> list[str]:
         return sorted({c["Labels"].get(COMPOSE_PROJECT) for c in self.containers() if c["Labels"].get(COMPOSE_PROJECT)})
 
-    def logs(self, container_id: str, tail: int = 50) -> list[tuple[str, str]]:
-        """Last `tail` lines as (timestamp, line), demultiplexing Docker's stdout/stderr frames."""
-        raw = self._get(f"/containers/{container_id}/logs", stdout=1, stderr=1, tail=tail, timestamps=1).content
+    def logs(self, container_id: str, tail: int | str = 50, since: int | None = None) -> list[tuple[str, str]]:
+        """Last `tail` lines (or all since `since`, unix time) as (timestamp, line), demultiplexing stdout/stderr."""
+        params = {"stdout": 1, "stderr": 1, "tail": tail, "timestamps": 1}
+        if since:
+            params["since"] = since
+        raw = self._get(f"/containers/{container_id}/logs", **params).content
         lines, i = [], 0
         if raw[:1] in (b"\x00", b"\x01", b"\x02") and len(raw) >= 8:  # multiplexed (no TTY)
             chunks = []

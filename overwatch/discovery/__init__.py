@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 
 from .docker import discover_docker
+from .externals import merge_suggestions
 from .prometheus import discover_prometheus
 from .sql import discover_sql, sqlalchemy_url
 
@@ -30,7 +31,11 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
     plan: dict[str, Any] = {
         "system": {"name": "my-system", "description": ""}, "docker": {}, "services": {}, "runtime_facts": "",
         "sources": {}, "catalog": [], "topology": {}, "checks": [], "evidence": [], "notes": [], "errors": [],
+        "externals": [], "log_source": None,
     }
+    env_hits: dict[str, dict[str, str]] = {}
+    log_hits: dict[str, dict[str, int]] = {}
+    internal: set[str] = set()
 
     if docker is not None:
         try:
@@ -48,6 +53,11 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
                 plan["checks"] += d["checks"]
                 plan["runtime_facts"] = d["runtime_facts"]
                 plan["notes"] += d["notes"]
+                env_hits.update(d["env_hits"])
+                for svc, hosts in d["log_hits"].items():
+                    log_hits.setdefault(svc, {}).update(hosts)
+                internal |= set(d["internal"])
+                plan["log_source"] = {"type": "docker", "source": "docker"}
         except Exception as e:
             plan["errors"].append(f"Docker: {e}")
 
@@ -74,8 +84,15 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
             plan["notes"] += s["notes"]
             for svc in s["services"]:
                 plan["services"].setdefault(svc, {"what": "TODO: describe what this service does"})
+            for svc, hosts in s["log_hits"].items():
+                for h, n in hosts.items():
+                    log_hits.setdefault(svc, {})[h] = log_hits.get(svc, {}).get(h, 0) + n
+            if s.get("logs") and (plan["log_source"] or {}).get("type") != "sql":
+                plan["log_source"] = {"type": "sql", "source": name, "dialect": s["dialect"], **s["logs"]}
         except Exception as e:
             plan["errors"].append(f"Database {name}: {str(e).splitlines()[0]}")
+    internal |= set(plan["services"]) | {h for src in plan["sources"].values() for h in re.findall(r"@([^:/]+)", src.get("url", ""))}
+    plan["externals"] = merge_suggestions(env_hits, log_hits, {h.lower() for h in internal})
 
     seen, unique = set(), []
     for c in plan["checks"]:
@@ -103,6 +120,51 @@ def _lit(text: str) -> Any:
     return _Literal(text.rstrip() + "\n") if "\n" in text.strip() else text
 
 
+def _key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def _apply_externals(plan: dict[str, Any]) -> tuple[dict[str, list[str]], dict[str, Any], list[dict[str, Any]]]:
+    """Accepted external services become topology edges, service knowledge, and checks."""
+    topology = {k: list(v) for k, v in plan.get("topology", {}).items()}
+    services = {k: dict(v) for k, v in plan.get("services", {}).items()}
+    checks: list[dict[str, Any]] = []
+    log_source = plan.get("log_source") or {}
+    for ext in plan.get("externals", []):
+        name = str(ext.get("name", "")).strip()
+        if not ext.get("enabled", True) or not name:
+            continue
+        for caller in ext.get("callers", []):
+            deps = topology.setdefault(caller, [])
+            if name not in deps:
+                deps.append(name)
+        services[name] = {
+            "what": ext.get("what") or "external dependency (third party); we only see it through our services",
+            "called_by": ", ".join(ext.get("callers", [])) or "unknown",
+        }
+        if url := str(ext.get("health_url", "")).strip():
+            checks.append({"name": f"{_key(name)}_up", "kind": "probe", "service": name, "url": url,
+                           "timeout_ms": 3000, "severity": "high", "description": f"{name} answered its health/status URL"})
+        text = str(ext.get("log_text", "")).strip().replace("'", "")
+        if text and log_source.get("type") == "sql":
+            pg = log_source.get("dialect") == "postgresql"
+            window = "now() - interval '2 minutes'" if pg else "datetime('now', '-2 minutes')"
+            checks.append({
+                "name": f"{_key(name)}_errors", "service": name, "source": log_source["source"],
+                "query": _lit(f"SELECT count(*) AS value FROM {log_source['table']}\n"
+                              f"WHERE upper({log_source['level']}) IN ('ERROR', 'FATAL', 'CRITICAL')\n"
+                              f"  AND message LIKE '%{text}%' AND {log_source['ts']} > {window}"),
+                "threshold": 5, "severity": "high", "description": f"errors mentioning {name}, last 2 minutes",
+            })
+        elif text and log_source.get("type") == "docker":
+            checks.append({
+                "name": f"{_key(name)}_errors", "service": name, "source": log_source["source"],
+                "query": f"count {','.join(ext.get('callers') or ['*'])} 2 {text}", "threshold": 5, "severity": "high",
+                "description": f"error log lines mentioning {name}, last 2 minutes",
+            })
+    return topology, services, checks
+
+
 def render(plan: dict[str, Any], llm: dict[str, str] | None = None) -> tuple[str, dict[str, str]]:
     """YAML text for overwatch.yaml, and the secrets (env var -> value) that belong in .env."""
     env: dict[str, str] = {}
@@ -126,7 +188,8 @@ def render(plan: dict[str, Any], llm: dict[str, str] | None = None) -> tuple[str
         env["OVERWATCH_TRIAGE_MODEL"] = llm["triage_model"]
 
     strip = lambda d: {k: v for k, v in d.items() if k not in ("enabled", "why")}  # noqa: E731
-    checks = [strip(c) for c in plan["checks"] if c.get("enabled", True)]
+    topology, services, extra_checks = _apply_externals(plan)
+    checks = [strip(c) for c in plan["checks"] + extra_checks if c.get("enabled", True)]
     for c in checks:
         if "query" in c:
             c["query"] = _lit(c["query"])
@@ -136,15 +199,15 @@ def render(plan: dict[str, Any], llm: dict[str, str] | None = None) -> tuple[str
     }
     if plan.get("docker"):
         doc["docker"] = plan["docker"]
-    doc["services"] = plan["services"]
+    doc["services"] = services
     if plan.get("runtime_facts"):
         doc["runtime_facts"] = _lit(plan["runtime_facts"])
     if sources:
         doc["sources"] = sources
     if plan.get("catalog"):
         doc["catalog"] = _lit(plan["catalog"])
-    if plan.get("topology"):
-        doc["topology"] = plan["topology"]
+    if topology:
+        doc["topology"] = topology
     if evidence:
         doc["evidence"] = evidence
     doc["checks"] = checks

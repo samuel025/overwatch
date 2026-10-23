@@ -102,3 +102,57 @@ def test_setup_flow_starts_watching_without_a_restart(tmp_path, monkeypatch):
         assert c.get("/api/status").status_code == 200
         assert c.get("/api/setup/state").json()["configured"] is True
     app.state.runtime.ow.stop()
+
+
+def test_external_hosts_come_from_settings_without_leaking_their_values():
+    from overwatch.discovery.externals import hosts_in_env, merge_suggestions
+
+    env = [
+        "PAYMENT_API_URL=https://api.stripe.com/v1",
+        "DATABASE_URL=postgresql://app:sup3rsecret@db.prod.example.com:5432/app",
+        "SMTP_HOST=smtp.sendgrid.net",
+        "CACHE_URL=redis://cache:6379",               # another container: not external
+        "INTERNAL_URL=http://orders.svc.cluster.local",  # cluster-internal
+        "PATH=/usr/bin", "PYTHON_VERSION=3.12.3",
+    ]
+    hits = hosts_in_env(env)
+    assert hits == {"api.stripe.com": "PAYMENT_API_URL", "db.prod.example.com": "DATABASE_URL",
+                    "smtp.sendgrid.net": "SMTP_HOST", "cache": "CACHE_URL", "orders.svc.cluster.local": "INTERNAL_URL"}
+    suggestions = merge_suggestions({"payments": hits}, {}, internal={"orders", "cache"})
+    names = [s["name"] for s in suggestions]
+    assert names == ["api.stripe.com", "db.prod.example.com", "smtp.sendgrid.net"]
+    assert "sup3rsecret" not in repr(suggestions)
+
+
+def test_external_hosts_from_error_logs_are_counted_per_caller():
+    from overwatch.discovery.externals import hosts_in_text, merge_suggestions
+
+    lines = ["POST https://psp.example.com/v1/charge returned 429", "GET https://psp.example.com/v1/x timed out"]
+    assert hosts_in_text(lines) == {"psp.example.com": 2}
+    [s] = merge_suggestions({}, {"payments": hosts_in_text(lines)}, internal=set())
+    assert s["callers"] == ["payments"] and "2 recent error log lines from payments" in s["evidence"][0]
+
+
+def test_accepted_externals_become_topology_knowledge_and_checks():
+    plan = {
+        "system": {"name": "s", "description": ""}, "services": {"payments": {"what": "charges cards"}},
+        "topology": {"payments": ["postgres"]}, "sources": {}, "catalog": "", "checks": [], "evidence": [],
+        "log_source": {"type": "sql", "source": "ops", "table": "app_logs", "ts": "ts", "level": "level",
+                       "dialect": "postgresql"},
+        "externals": [
+            {"name": "api.stripe.com", "callers": ["payments"], "health_url": "https://status.stripe.com/x",
+             "log_text": "api.stripe.com", "enabled": True},
+            {"name": "ignored.example.com", "callers": ["payments"], "enabled": False},
+        ],
+    }
+    doc = yaml.safe_load(render(plan)[0])
+    assert doc["topology"]["payments"] == ["postgres", "api.stripe.com"]
+    assert doc["services"]["api.stripe.com"]["called_by"] == "payments"
+    checks = {c["name"]: c for c in doc["checks"]}
+    assert checks["api_stripe_com_up"]["kind"] == "probe"
+    assert "LIKE '%api.stripe.com%'" in checks["api_stripe_com_errors"]["query"]
+    assert "ignored.example.com" not in repr(doc)
+
+    plan["log_source"] = {"type": "docker", "source": "docker"}
+    doc = yaml.safe_load(render(plan)[0])
+    assert next(c for c in doc["checks"] if c["name"] == "api_stripe_com_errors")["query"] == "count payments 2 api.stripe.com"

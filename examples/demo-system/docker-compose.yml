@@ -39,13 +39,19 @@ services:
 
   payments-a:
     <<: *service
-    environment: { SERVICE: payments, INSTANCE: payments-a }
+    environment:
+      SERVICE: payments
+      INSTANCE: payments-a
+      PROVIDER_URL: http://psp.example.com:8000/psp   # the external card processor (played by chaos)
     labels: { shop.service: payments, shop.instance: payments-a }
     ports: ["8003:8000"]
 
   payments-b:
     <<: *service
-    environment: { SERVICE: payments, INSTANCE: payments-b }
+    environment:
+      SERVICE: payments
+      INSTANCE: payments-b
+      PROVIDER_URL: http://psp.example.com:8000/psp   # the external card processor (played by chaos)
     labels: { shop.service: payments, shop.instance: payments-b }
     ports: ["8005:8000"]
 
@@ -61,6 +67,9 @@ services:
     cpus: 2
     command: ["uvicorn", "chaos:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
     ports: ["8004:8000"]
+    networks:
+      default:
+        aliases: [psp.example.com]   # plays the third-party card processor
 
   collector:
     <<: *service

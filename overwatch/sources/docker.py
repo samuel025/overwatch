@@ -5,6 +5,7 @@ Queries are tiny commands instead of SQL:
   logs <service> [lines]        the last lines each container of that service printed (default 50)
   errors <service> [lines]      the same, keeping only lines that look like errors
   events [minutes]              container die/start/oom/kill/restart events (default 15 minutes)
+  count <service[,service]|*> <minutes> <text>   error-like log lines in the window containing the text
 """
 
 from __future__ import annotations
@@ -20,7 +21,8 @@ _ERRORISH = re.compile(r"error|exception|traceback|fatal|panic|refused|timeout|t
 
 
 class DockerSource(DataSource):
-    language = "Docker commands (containers | logs <service> [lines] | errors <service> [lines] | events [minutes])"
+    language = ("Docker commands (containers | logs <service> [lines] | errors <service> [lines] | events [minutes] "
+                "| count <service|*> <minutes> <text>)")
 
     def __init__(self, name: str, cfg: dict[str, Any]):
         super().__init__(name, cfg)
@@ -51,6 +53,10 @@ class DockerSource(DataSource):
             if cmd == "events":
                 minutes = int(args[0]) if args and args[0].isdigit() else 15
                 return self._events(minutes)[-self.max_rows :]
+            if cmd == "count":
+                if len(args) < 3 or not args[1].isdigit():
+                    raise SourceError("usage: count <service|*> <minutes> <text>")
+                return [{"value": self._count(args[0], int(args[1]), " ".join(args[2:]))}]
         except DockerError as e:
             raise SourceError(str(e)) from e
         raise SourceError(f"unknown command '{cmd}'. Use: containers | logs <service> | errors <service> | events")
@@ -85,6 +91,26 @@ class DockerSource(DataSource):
                     continue
                 rows.append({"ts": ts, "container": c["Names"][0].lstrip("/"), "line": line[:300]})
         return sorted(rows, key=lambda r: r["ts"])
+
+    def _count(self, services: str, minutes: int, text: str) -> int:
+        import time as _time
+
+        if services == "*":
+            containers = self.api.containers(self.project)
+        else:
+            containers = [c for s in services.split(",") if s for c in self._service_containers(s)]
+        since = int(_time.time()) - minutes * 60
+        needle = text.lower()
+        total = 0
+        for c in containers:
+            if c["State"] != "running":
+                continue
+            try:  # bounded read: a check runs every pass, so never pull a container's whole history
+                lines = self.api.logs(c["Id"], tail=2000, since=since)
+            except DockerError:
+                continue
+            total += sum(1 for _, line in lines if needle in line.lower() and _ERRORISH.search(line))
+        return total
 
     def _events(self, minutes: int) -> list[dict[str, Any]]:
         filters = {"label": [f"com.docker.compose.project={self.project}"]} if self.project else None

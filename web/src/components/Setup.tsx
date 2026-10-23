@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { toast } from "sonner";
-import { setupApi, type Plan, type SetupState } from "../api";
+import { setupApi, type External, type Plan, type SetupState } from "../api";
 import { SystemMap } from "./SystemMap";
 
 type Step = "connect" | "review" | "saving";
@@ -80,6 +80,18 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
 
   const updatePlan = (fn: (p: Plan) => Plan) => setPlan((p) => (p ? fn(structuredClone(p)) : p));
   const todo = (v: string) => v.startsWith("TODO");
+  const setExternal = (i: number, patch: Partial<External>) =>
+    updatePlan((p) => { p.externals[i] = { ...p.externals[i], ...patch }; return p; });
+  // The map preview includes accepted external services.
+  const previewTopology = (() => {
+    if (!plan) return {};
+    const t: Record<string, string[]> = Object.fromEntries(Object.entries(plan.topology).map(([k, v]) => [k, [...v]]));
+    for (const e of plan.externals ?? []) {
+      if (!e.enabled || !e.name.trim()) continue;
+      for (const c of e.callers) t[c] = [...new Set([...(t[c] ?? []), e.name.trim()])];
+    }
+    return t;
+  })();
 
   return (
     <div className="setup">
@@ -191,7 +203,54 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
               <h2 className="card-title">Your system: {Object.keys(plan.services).length} services</h2>
               <span className="small muted">Discovered from {[plan.docker.project && "Docker", ...Object.keys(plan.sources)].filter(Boolean).join(", ")}</span>
             </div>
-            {Object.keys(plan.topology).length > 0 ? <SystemMap preview={plan.topology} /> : <p className="empty">No dependencies found; add a topology later if you like.</p>}
+            {Object.keys(previewTopology).length > 0 ? <SystemMap preview={previewTopology} /> : <p className="empty">No dependencies found; add a topology later if you like.</p>}
+          </section>
+
+          <section className="card">
+            <h2 className="card-title">External services</h2>
+            <p className="field-hint">
+              Third-party APIs and managed services your system calls. Docker cannot see them, so Overwatch looks for
+              their addresses in your services' settings and error logs (only the hostname is kept, never the setting's
+              value). Add any it missed.
+            </p>
+            {(plan.externals ?? []).length === 0 && <p className="empty">None found.</p>}
+            <ul className="external-list">
+              {(plan.externals ?? []).map((e, i) => (
+                <li key={i} className={clsx("external", !e.enabled && "external-off")}>
+                  <div className="external-top">
+                    <label className="toggle">
+                      <input type="checkbox" checked={e.enabled} onChange={(ev) => setExternal(i, { enabled: ev.target.checked })} />
+                      <input className="external-name" value={e.name} placeholder="api.example.com" onChange={(ev) => setExternal(i, { name: ev.target.value })} />
+                    </label>
+                    {e.suggested ? <span className="kind-chip">found automatically</span> : <span className="kind-chip">added by you</span>}
+                  </div>
+                  {e.evidence?.length > 0 && <p className="field-hint">{e.evidence.join(" · ")}</p>}
+                  <div className="field-label">Called by</div>
+                  <div className="caller-row">
+                    {Object.keys(plan.services).filter((s) => s !== e.name).map((s) => (
+                      <label key={s} className={clsx("caller", e.callers.includes(s) && "caller-on")}>
+                        <input type="checkbox" checked={e.callers.includes(s)}
+                          onChange={(ev) => setExternal(i, { callers: ev.target.checked ? [...e.callers, s] : e.callers.filter((c) => c !== s) })} />
+                        {s}
+                      </label>
+                    ))}
+                  </div>
+                  <div className="field-row">
+                    <Field label="Health or status URL (optional)" hint="Overwatch will call it to tell 'them' from 'us'">
+                      <input value={e.health_url} placeholder="https://status.example.com/api/v2/status.json" onChange={(ev) => setExternal(i, { health_url: ev.target.value })} />
+                    </Field>
+                    <Field label="Text in your error logs when it fails (optional)"
+                      hint={plan.log_source ? `Becomes a check on ${plan.log_source.type === "sql" ? plan.log_source.table : "container logs"}: more than 5 such errors in 2 minutes` : "No logs found to check"}>
+                      <input value={e.log_text} placeholder="e.g. the hostname, or a word from the error" onChange={(ev) => setExternal(i, { log_text: ev.target.value })} />
+                    </Field>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <button className="btn btn-small-inline"
+              onClick={() => updatePlan((p) => ({ ...p, externals: [...(p.externals ?? []), { name: "", callers: [], evidence: [], health_url: "", log_text: "", enabled: true, suggested: false }] }))}>
+              + Add an external service
+            </button>
           </section>
 
           <section className="card">

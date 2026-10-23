@@ -55,6 +55,19 @@ export interface Plan {
   evidence: { name: string; label: string; source: string; query: string; enabled: boolean }[];
   notes: string[];
   errors: string[];
+  externals: External[];
+  log_source: { type: "sql" | "docker"; source: string; table?: string } | null;
+}
+
+export interface External {
+  name: string;
+  callers: string[];
+  evidence: string[];
+  health_url: string;
+  log_text: string;
+  enabled: boolean;
+  suggested: boolean;
+  what?: string;
 }
 
 const post = <T,>(path: string, body: unknown) =>

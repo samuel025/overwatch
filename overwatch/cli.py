@@ -178,6 +178,10 @@ def cmd_connect(args) -> int:
     for c in plan["checks"]:
         print(f"  - {c['name']:<32} {c.get('why', '')}")
     print(f"Evidence pack: {len(plan['evidence'])} queries" + (f"; sources: {', '.join(plan['sources'])}" if plan["sources"] else ""))
+    if plan["externals"]:
+        print("External services found (added to the topology; remove any you do not want):")
+        for e in plan["externals"]:
+            print(f"  - {e['name']:<28} called by {', '.join(e['callers']) or '?'} ({'; '.join(e['evidence'])})")
     for n in plan["notes"]:
         print(f"  note: {n}")
     if args.print:
