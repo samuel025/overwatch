@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .events import to_json
 from .orchestrator import Overwatch
 
 DIST = Path(__file__).parent / "ui" / "dist"
@@ -271,11 +272,11 @@ def create_app(ow: Overwatch | None, watch: bool = True, token: str | None = Non
         async def stream():
             try:
                 for event in backlog:
-                    yield f"data: {json.dumps(event, default=str)}\n\n"
+                    yield f"data: {to_json(event)}\n\n"
                 while not await request.is_disconnected() and rt.ow is current:
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=15)
-                        yield f"data: {json.dumps(event, default=str)}\n\n"
+                        yield f"data: {to_json(event)}\n\n"
                     except asyncio.TimeoutError:
                         yield ": keepalive\n\n"
             finally:

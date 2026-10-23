@@ -373,3 +373,13 @@ def test_docker_stop_is_reported_as_a_stop_not_a_crash():
     ev.handle({"Action": "die", "Actor": {"ID": "c2", "Attributes": {**attrs, "exitCode": "1"}}})  # a real crash
     assert "stopped on request" in seen[0][3] and "SIGTERM" in seen[0][3] and "did not crash" in seen[0][3]
     assert "stopped on request" not in seen[1][3] and "exit code 1" in seen[1][3]
+
+
+def test_events_with_nan_are_valid_json_for_the_browser():
+    import json
+
+    from overwatch.events import to_json
+
+    event = {"type": "incident.updated", "incident": {"evidence": [{"rows": [{"value": float("nan")}, {"value": float("inf")}, {"value": 1.5}]}]}}
+    parsed = json.loads(to_json(event), parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))  # a browser rejects NaN
+    assert [r["value"] for r in parsed["incident"]["evidence"][0]["rows"]] == [None, None, 1.5]

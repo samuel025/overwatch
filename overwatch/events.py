@@ -10,6 +10,8 @@ import asyncio
 import itertools
 import threading
 import time
+import json
+import math
 from collections import deque
 from typing import Any
 
@@ -41,3 +43,22 @@ class EventBus:
     def unsubscribe(self, queue: asyncio.Queue) -> None:
         with self._lock:
             self._subscribers = [(lp, q) for lp, q in self._subscribers if q is not queue]
+
+
+def finite(value: Any) -> Any:
+    """Replace NaN/Infinity with None, recursively: they are not valid JSON and a browser drops the whole message."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [finite(v) for v in value]
+    return value
+
+
+def to_json(event: dict[str, Any]) -> str:
+    """Serialize an event for the browser (server-sent events)."""
+    try:
+        return json.dumps(event, default=str, allow_nan=False)
+    except ValueError:
+        return json.dumps(finite(event), default=str, allow_nan=False)

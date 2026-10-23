@@ -136,3 +136,9 @@ def test_docker_reports_health_only_for_running_containers():
     rows = {r["service"]: r for r in src.query("containers")}
     assert rows["db"]["health"] is None  # a stopped container's stale 'unhealthy' means nothing
     assert rows["web"]["health"] == "healthy"
+
+
+def test_prometheus_nan_and_infinity_become_null():
+    from overwatch.sources.prometheus import _num
+
+    assert _num("NaN") is None and _num("+Inf") is None and _num("-Inf") is None and _num("2.5") == 2.5

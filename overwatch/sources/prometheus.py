@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import math
+
 from typing import Any
 
 import httpx
 
 from .base import DataSource, SourceError
+
+
+def _num(raw) -> float | None:
+    """Prometheus answers "NaN" (e.g. a quantile with no data) and "+Inf": neither is valid JSON, so they become None."""
+    value = float(raw)
+    return value if math.isfinite(value) else None
 
 
 class PrometheusSource(DataSource):
@@ -35,11 +43,11 @@ class PrometheusSource(DataSource):
             raise SourceError(body.get("error", f"HTTP {r.status_code}"))
         data = body["data"]
         if data["resultType"] == "scalar":
-            return [{"value": float(data["result"][1])}]
+            return [{"value": _num(data["result"][1])}]
         rows = []
         for item in data["result"][: self.max_rows]:
             value = item.get("value") or (item.get("values") or [[None, None]])[-1]
-            rows.append({**item.get("metric", {}), "value": float(value[1]) if value[1] is not None else None})
+            rows.append({**item.get("metric", {}), "value": _num(value[1]) if value[1] is not None else None})
         return rows
 
     def close(self) -> None:
