@@ -68,10 +68,14 @@ function NodeCard({ name, h, x, y }: { name: string; h: NodeHealth; x: number; y
   );
 }
 
-export function SystemMap({ blast }: { blast?: BlastRadius | null }) {
-  const topology = useStore((s) => s.status?.topology);
-  const checks = useStore((s) => s.checks);
-  const down = useStore((s) => s.down);
+export function SystemMap({ blast, preview }: { blast?: BlastRadius | null; preview?: Record<string, string[]> }) {
+  const liveTopology = useStore((s) => s.status?.topology);
+  const liveChecks = useStore((s) => s.checks);
+  const liveDown = useStore((s) => s.down);
+  // In preview mode (setup page) we only know the structure, not the health.
+  const topology = preview ?? liveTopology;
+  const checks = preview ? [] : liveChecks;
+  const down = preview ? {} : liveDown;
   if (!topology || !Object.keys(topology).length) {
     return <p className="empty">Add a <code>topology:</code> section to overwatch.yaml to see the system map.</p>;
   }

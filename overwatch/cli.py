@@ -29,7 +29,8 @@ def cmd_doctor(ow: Overwatch) -> int:
     print("Sources")
     for name, src in ow.sources.items():
         try:
-            src.query("SELECT 1" if src.language == "SQL" else "vector(1)")
+            src.query("vector(1)" if src.language == "PromQL" else "containers" if name == "docker" or
+                      src.cfg.get("type") == "docker" else "SELECT 1")
             good &= _ok(name, True, src.language)
         except Exception as e:
             good &= _ok(name, False, str(e))
@@ -49,6 +50,13 @@ def cmd_doctor(ow: Overwatch) -> int:
         if c.kind == "probe":
             up = ow.watcher._probe(c) == 1
             good &= _ok(c.name, up, f"{c.url} {'answered' if up else 'did not answer'}")
+            continue
+        if c.kind == "container":
+            try:
+                n = ow.sources[c.source].running(c.service)
+                good &= _ok(c.name, n > 0, f"{n} running container{'s' if n != 1 else ''} for {c.service}")
+            except Exception as e:
+                good &= _ok(c.name, False, str(e))
             continue
         try:
             rows = ow.sources[c.source].query(c.query)
@@ -120,20 +128,88 @@ def cmd_investigate(ow: Overwatch, symptom: str, service: str, assume_yes: bool)
     return _finish(ow, inc, assume_yes)
 
 
-def cmd_run(ow: Overwatch, host: str, port: int, insecure: bool) -> int:
+def cmd_run(ow: Overwatch | None, host: str, port: int, insecure: bool, config_path: str) -> int:
+    """Serve the console. With no config yet, it opens on the setup page."""
+    import os
+
     import uvicorn
 
     from .server import create_app
 
-    token = ow.cfg.console_token
+    token = ow.cfg.console_token if ow else os.environ.get("OVERWATCH_TOKEN", "")
     local = host in ("127.0.0.1", "localhost", "::1")
     if not local and not token and not insecure:
         print(f"Refusing to serve the console on {host} without a token: anyone on the network could approve "
-              "reports. Set OVERWATCH_TOKEN (or console.token in the config), or pass --insecure.")
+              "reports (or, in setup mode, write configuration). Set OVERWATCH_TOKEN, or pass --insecure.")
         return 2
     url = f"http://{host}:{port}" + (f"/?token={token}" if token else "")
-    print(f"Overwatch watching '{ow.cfg.system_name}' every {ow.cfg.interval_seconds}s. Console: {url}")
-    uvicorn.run(create_app(ow), host=host, port=port, log_level="warning")
+    if ow:
+        print(f"Overwatch watching '{ow.cfg.system_name}' every {ow.cfg.interval_seconds}s. Console: {url}")
+    else:
+        print(f"No {config_path} yet. Open {url} to connect your system (or run `overwatch connect`).")
+    uvicorn.run(create_app(ow, config_path=config_path), host=host, port=port, log_level="warning")
+    return 0
+
+
+def cmd_connect(args) -> int:
+    """Discover a system and write overwatch.yaml + .env."""
+    from .discovery import discover, render, write
+
+    databases = {}
+    for spec in args.database or []:
+        name, _, url = spec.partition("=")
+        if not url:
+            print(f"--database expects NAME=URL, got '{spec}'")
+            return 2
+        databases[name] = url
+    docker = {"project": args.project or "", "service_label": args.service_label or ""} if args.docker else None
+    if not (docker or args.prometheus or databases):
+        print("Nothing to discover: pass --docker, --prometheus URL and/or --database NAME=URL")
+        return 2
+    plan = discover(docker, args.prometheus or "", databases)
+    for e in plan["errors"]:
+        print(f"  [!] {e}")
+    if plan["errors"] and not plan["checks"]:
+        return 1
+    print(f"Found {len(plan['services'])} services: {', '.join(sorted(plan['services'])) or '-'}")
+    if plan["topology"]:
+        print("Topology: " + "; ".join(f"{s} -> {', '.join(d) or '-'}" for s, d in plan["topology"].items()))
+    print(f"Proposed {len(plan['checks'])} checks:")
+    for c in plan["checks"]:
+        print(f"  - {c['name']:<32} {c.get('why', '')}")
+    print(f"Evidence pack: {len(plan['evidence'])} queries" + (f"; sources: {', '.join(plan['sources'])}" if plan["sources"] else ""))
+    for n in plan["notes"]:
+        print(f"  note: {n}")
+    if args.print:
+        print(render(plan)[0])
+        return 0
+    result = write(plan, args.config)
+    print(f"\nWrote {result['config']}" + (f" (previous version kept as {result['backup']})" if result["backup"] else ""))
+    if result["secrets"]:
+        print(f"Secrets ({', '.join(result['secrets'])}) are in {result['env']}")
+    print(f"Next: fill in the TODOs, then `overwatch -c {args.config} doctor` and `overwatch -c {args.config} run`")
+    return 0
+
+
+def cmd_change(args) -> int:
+    """Report a release/config change to a running Overwatch (for CI pipelines)."""
+    import os
+
+    import httpx
+
+    token = os.environ.get("OVERWATCH_TOKEN", "")
+    body = {"service": args.service, "version": args.version or "", "kind": args.kind,
+            "author": args.author or os.environ.get("USER", ""), "description": args.description or ""}
+    try:
+        r = httpx.post(f"{args.url.rstrip('/')}/api/changes", json=body, timeout=10,
+                       headers={"Authorization": f"Bearer {token}"} if token else {})
+    except httpx.HTTPError as e:
+        print(f"Could not reach Overwatch at {args.url}: {e}")
+        return 1
+    if r.status_code != 200:
+        print(f"Overwatch answered {r.status_code}: {r.text[:200]}")
+        return 1
+    print(f"Recorded {args.kind} of {args.service} {args.version or ''}".rstrip())
     return 0
 
 
@@ -166,10 +242,37 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--insecure", action="store_true", help="allow a non-local host without a console token")
     n = sub.add_parser("init", help="write a starter overwatch.yaml")
     n.add_argument("path", nargs="?", default="overwatch.yaml")
+    k = sub.add_parser("connect", help="discover your system and write overwatch.yaml")
+    k.add_argument("--docker", action="store_true", help="discover services from Docker / Docker Compose")
+    k.add_argument("--project", help="Docker Compose project (if several are running)")
+    k.add_argument("--service-label", help="container label naming the service (default: compose service)")
+    k.add_argument("--prometheus", metavar="URL", help="Prometheus base URL")
+    k.add_argument("--database", metavar="NAME=URL", action="append", help="a SQL database (repeatable)")
+    k.add_argument("--print", action="store_true", help="print the config instead of writing it")
+    ch = sub.add_parser("change", help="report a release or config change to a running Overwatch")
+    ch.add_argument("--service", required=True)
+    ch.add_argument("--version")
+    ch.add_argument("--kind", default="deploy", choices=["deploy", "config", "rollback", "infra"])
+    ch.add_argument("--description")
+    ch.add_argument("--author")
+    ch.add_argument("--url", default="http://127.0.0.1:8080")
     args = p.parse_args(argv)
 
     if args.cmd == "init":
         return cmd_init(args.path)
+    if args.cmd == "connect":
+        return cmd_connect(args)
+    if args.cmd == "change":
+        from .config import load_dotenv
+
+        load_dotenv()
+        return cmd_change(args)
+    if args.cmd == "run" and not Path(args.config).exists():
+        from .config import load_dotenv
+
+        load_dotenv()
+        load_dotenv(Path(args.config).resolve().parent / ".env")
+        return cmd_run(None, args.host, args.port, args.insecure, args.config)
 
     cfg = load_config(args.config)
     override = None
@@ -183,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "investigate":
         return cmd_investigate(ow, args.symptom, args.service, args.yes)
     if args.cmd == "run":
-        return cmd_run(ow, args.host, args.port, args.insecure)
+        return cmd_run(ow, args.host, args.port, args.insecure, args.config)
     return 2
 
 

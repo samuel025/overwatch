@@ -43,7 +43,7 @@ def _jsonable(v: Any) -> Any:
 
 
 class SQLSource(DataSource):
-    language = "SQL"
+    language = "SQL"  # refined per dialect below, so the model writes the right syntax
 
     def __init__(self, name: str, cfg: dict[str, Any]):
         super().__init__(name, cfg)
@@ -52,6 +52,8 @@ class SQLSource(DataSource):
         self.timeout_ms = int(cfg.get("timeout_seconds", 10)) * 1000
         self.engine = create_engine(cfg["url"], pool_pre_ping=True)
         self.dialect = self.engine.dialect.name
+        self.language = {"postgresql": "PostgreSQL SQL", "sqlite": "SQLite SQL", "mysql": "MySQL SQL"}.get(
+            self.dialect, f"SQL ({self.dialect})")
 
     def query(self, q: str) -> list[dict[str, Any]]:
         sql = check_read_only(q)

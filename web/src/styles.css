@@ -359,6 +359,38 @@ code { font: 12.5px var(--mono); }
 .call-agent { color: var(--muted); text-transform: capitalize; }
 .call-num { font-variant-numeric: tabular-nums; color: var(--muted); }
 
+/* ---------- setup ---------- */
+.header-link { font-size: 12.5px; color: var(--muted); text-decoration: none; }
+@media (hover: hover) and (pointer: fine) { .header-link:hover { color: var(--text); } }
+.setup { max-width: 980px; margin: 0 auto; padding: 32px 16px 64px; display: flex; flex-direction: column; gap: 20px; }
+.setup-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; align-items: flex-end; }
+.setup-head h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: -0.02em; }
+.setup-head p { max-width: 620px; }
+.steps { list-style: none; margin: 0; padding: 0; display: flex; gap: 6px; font-size: 12.5px; }
+.steps li { padding: 4px 10px; border-radius: 99px; border: 1px solid var(--line); color: var(--faint); }
+.steps li.on { color: var(--text); border-color: var(--accent); }
+.setup-grid { display: flex; flex-direction: column; gap: 16px; }
+.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; flex: 1; min-width: 0; }
+.field-label { font-size: 12.5px; font-weight: 600; }
+.field-hint { display: block; font-size: 12px; color: var(--faint); font-weight: 400; }
+.field-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.field input, .field select, .field textarea, .db-row input {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; outline: none; width: 100%;
+  transition: border-color 150ms ease; font: inherit; color: inherit;
+}
+.field input:focus, .field select:focus, .field textarea:focus, .db-row input:focus { border-color: var(--accent); }
+.field .todo { border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); }
+.db-row { display: grid; grid-template-columns: 160px minmax(0, 1fr) auto; gap: 8px; margin: 6px 0; }
+@media (max-width: 640px) { .db-row { grid-template-columns: minmax(0, 1fr); } }
+.btn-small-inline { padding: 3px 10px; font-size: 12.5px; margin: 4px 0 8px; }
+.toggle { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; padding: 4px 0; }
+.toggle input { margin-top: 3px; accent-color: var(--accent); }
+.preset-row, .test-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.setup-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.check-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 2px 16px; }
+.kind-chip { font-size: 10.5px; color: var(--faint); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; margin-left: 4px; }
+.yaml-preview { max-height: 420px; margin-top: 10px; }
+
 /* ---------- keyframes ---------- */
 @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 @keyframes flow { to { stroke-dashoffset: -12; } }

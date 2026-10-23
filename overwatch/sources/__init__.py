@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .base import DataSource, SourceError
+from .docker import DockerSource
 from .prometheus import PrometheusSource
 from .sql import SQLSource
 
@@ -11,6 +12,7 @@ SOURCE_TYPES: dict[str, type[DataSource]] = {
     "zetaris": SQLSource,  # Zetaris exposes a SQL endpoint; same adapter, separate name for clarity
     "postgres": SQLSource,
     "prometheus": PrometheusSource,
+    "docker": DockerSource,
 }
 
 

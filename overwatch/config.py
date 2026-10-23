@@ -53,7 +53,7 @@ class CheckConfig:
     description: str = ""
     severity: str = "medium"
     no_data: str = "ignore"  # "alert": a check that returns no value is itself an anomaly (service went silent)
-    kind: str = "metric"  # "heartbeat" / "probe": when it fires, the service is shown as not responding
+    kind: str = "metric"  # "heartbeat" / "probe" / "container": when it fires, the service is not responding
     url: str = ""  # probe: the health URL Overwatch calls itself (value 1 = answered 2xx, 0 = did not)
     timeout_ms: int = 2000  # probe timeout
     relative_factor: float | None = None  # alert when value > factor x this check's own recent median
@@ -112,6 +112,7 @@ class Config:
     impacts: list[ImpactConfig] = field(default_factory=list)
     evidence: list[EvidenceConfig] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)  # pushed event streams, e.g. docker
+    docker: dict[str, Any] = field(default_factory=dict)  # {project, service_label, socket}: turns on Docker features
     interval_seconds: int = 30
     confirm_samples: int = 2  # a check must breach this many passes in a row to open an incident
     event_grace_seconds: float = 8  # a container back up within this is a restart, not an outage
@@ -139,11 +140,18 @@ def load_config(path: str | Path) -> Config:
     checks = [CheckConfig(**c) for c in raw.get("checks", [])]
 
     sources = raw.get("sources", {})
+    docker = raw.get("docker") or {}
+    if docker and "docker" not in sources:  # the docker section implies the built-in docker source
+        sources = {**sources, "docker": {"type": "docker", **docker}}
     for c in checks:
-        if c.kind == "probe":
-            if not c.url:
+        if c.kind in ("probe", "container"):
+            if c.kind == "probe" and not c.url:
                 raise ValueError(f"probe '{c.name}' needs a url")
-            if c.threshold is None:  # a probe reports 1 (answered) or 0 (did not)
+            if c.kind == "container" and not c.source:
+                if "docker" not in sources:
+                    raise ValueError(f"container check '{c.name}' needs a docker: section or a docker source")
+                c.source = "docker"
+            if c.threshold is None:  # reports 1+ (up) or 0 (down)
                 c.threshold, c.comparison = 1, "<"
         elif c.source not in sources:
             raise ValueError(f"check '{c.name}' uses unknown source '{c.source}'")
@@ -151,8 +159,8 @@ def load_config(path: str | Path) -> Config:
             raise ValueError(f"check '{c.name}': comparison must be one of > >= < <=")
         if c.threshold is None and not c.relative_factor:
             raise ValueError(f"check '{c.name}' needs a threshold, a relative_factor, or both")
-        if c.kind not in ("metric", "heartbeat", "probe"):
-            raise ValueError(f"check '{c.name}': kind must be 'metric', 'heartbeat' or 'probe'")
+        if c.kind not in ("metric", "heartbeat", "probe", "container"):
+            raise ValueError(f"check '{c.name}': kind must be metric, heartbeat, probe or container")
         if c.no_data not in ("ignore", "alert"):
             raise ValueError(f"check '{c.name}': no_data must be 'ignore' or 'alert'")
 
@@ -195,7 +203,12 @@ def load_config(path: str | Path) -> Config:
         topology=topology,
         impacts=impacts,
         evidence=evidence,
-        events=raw.get("events", []),
+        events=raw.get("events") or ([{"type": "docker", "socket": docker.get("socket", "/var/run/docker.sock"),
+                                        "service_label": docker.get("service_label", "com.docker.compose.service"),
+                                        "instance_label": docker.get("instance_label", "com.docker.compose.service"),
+                                        "filters": {"label": [f"com.docker.compose.project={docker['project']}"]}
+                                        if docker.get("project") else {}}] if docker else []),
+        docker=docker,
         confirm_samples=max(1, int(watch.get("confirm_samples", 2))),
         event_grace_seconds=float(watch.get("event_grace_seconds", 8)),
         interval_seconds=int(watch.get("interval_seconds", 30)),

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .agents import Historian, Investigator, Responder, Watcher
-from .config import Config
+from .config import Config, EvidenceConfig
 from .events import EventBus
 from .impact import incident_start, measure, spread
 from .listeners import LISTENER_TYPES
@@ -41,7 +41,9 @@ class Overwatch:
         self.trace_dir = Path(cfg.trace_dir)
         self.trace_dir.mkdir(parents=True, exist_ok=True)
         self.events = EventBus()
-        self.sources = build_sources(cfg.sources)
+        self.store = IncidentStore(cfg.state_path or self.trace_dir / "overwatch.db")
+        self.sources = build_sources(self._with_builtin_sources(cfg))
+        self.evidence = self._with_default_evidence(cfg)
         self.llm = LLM(cfg.llm, self.trace_dir)
         self.llm.on_call = lambda record: self.events.emit("llm.call", **record)
         self.memory = build_memory(memory_override or cfg.memory)
@@ -57,13 +59,55 @@ class Overwatch:
         self.failing: set[str] = set()  # checks firing on the latest pass
         self.healthy_since: dict[str, float] = {}  # incident id -> when all its checks first looked healthy
         self.pool = ThreadPoolExecutor(cfg.max_parallel_investigations, thread_name_prefix="investigation")
-        self.store = IncidentStore(cfg.state_path or self.trace_dir / "overwatch.db")
         # instance -> {service, since, detail} for containers a pushed event says are down
         self.down: dict[str, dict[str, Any]] = {}
         self.listeners = [
             LISTENER_TYPES[e["type"]](e, self.on_container_event) for e in cfg.events if e.get("type") in LISTENER_TYPES
         ]
         self._restore()
+
+    def _with_builtin_sources(self, cfg: Config) -> dict[str, dict[str, Any]]:
+        """Add the read-only `overwatch` change log (and describe the built-ins) so they work with no setup."""
+        sources = dict(cfg.sources)
+        notes = []
+        if "overwatch" not in sources:
+            path = Path(self.store.path).resolve()
+            sources["overwatch"] = {"type": "sql", "url": f"sqlite:///file:{path}?mode=ro&uri=true"}
+            notes.append(
+                "overwatch (SQLite SQL, built in): changes(ts TEXT ISO-8601 UTC, service, version, kind, author, "
+                "description): every release/config change reported to Overwatch. "
+                "Time windows: WHERE ts > strftime('%Y-%m-%dT%H:%M:%S', 'now', '-30 minutes')"
+            )
+        if any(s.get("type") == "docker" for s in sources.values()) and "docker:" not in cfg.catalog:
+            notes.append(
+                "docker (built in, commands not SQL): `containers` (state, exit_code, oom_killed, restarts, limits), "
+                "`logs <service> [lines]`, `errors <service> [lines]`, `events [minutes]` (die/start/oom/kill)"
+            )
+        if notes:
+            cfg.catalog = (cfg.catalog.rstrip() + "\n" + "\n".join(notes)).strip()
+        return sources
+
+    def _with_default_evidence(self, cfg: Config) -> list[EvidenceConfig]:
+        evidence = list(cfg.evidence)
+        names = {e.name for e in evidence}
+        defaults = [EvidenceConfig(
+            "reported_changes", "Changes reported to Overwatch in the last hour", "overwatch",
+            "SELECT ts, service, version, kind, author, description FROM changes "
+            "WHERE ts > strftime('%Y-%m-%dT%H:%M:%S', 'now', '-60 minutes') ORDER BY ts DESC LIMIT 20")]
+        docker = next((n for n, s in cfg.sources.items() if s.get("type") == "docker"), None) or (
+            "docker" if cfg.docker else None)
+        if docker:
+            defaults += [EvidenceConfig("containers_now", "Container state now", docker, "containers"),
+                         EvidenceConfig("container_events", "Container events in the last 30 minutes", docker, "events 30")]
+        cfg.evidence = evidence + [d for d in defaults if d.name not in names]
+        return cfg.evidence
+
+    def record_change(self, service: str, version: str = "", kind: str = "deploy", author: str = "",
+                      description: str = "", ts: str | None = None) -> dict:
+        """A release or config change reported to Overwatch (CLI `overwatch change` or POST /api/changes)."""
+        row = self.store.record_change(service, version, kind, author, description, ts)
+        self.events.emit("change.recorded", **row)
+        return row
 
     def start_listeners(self) -> None:
         for listener in self.listeners:
@@ -364,7 +408,7 @@ class Overwatch:
                     for c in self.cfg.checks
                 ],
                 "history": {name: list(points) for name, points in self.watcher.history.items()},
-                "sources": [{"name": n, "language": s.language, "type": self.cfg.sources[n].get("type", "sql")}
+                "sources": [{"name": n, "language": s.language, "type": s.cfg.get("type", "sql")}
                             for n, s in self.sources.items()],
                 "interval_seconds": self.cfg.interval_seconds,
                 "topology": self.cfg.topology,

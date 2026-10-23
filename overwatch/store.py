@@ -20,7 +20,24 @@ class IncidentStore:
             "CREATE TABLE IF NOT EXISTS incidents (id TEXT PRIMARY KEY, opened_at TEXT NOT NULL, "
             "status TEXT NOT NULL, data TEXT NOT NULL)"
         )
+        # Change log: releases and config changes reported to Overwatch (overwatch change / POST /api/changes).
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS changes (ts TEXT NOT NULL, service TEXT NOT NULL, version TEXT, "
+            "kind TEXT NOT NULL DEFAULT 'deploy', author TEXT, description TEXT)"
+        )
         self._db.commit()
+
+    def record_change(self, service: str, version: str = "", kind: str = "deploy", author: str = "",
+                      description: str = "", ts: str | None = None) -> dict:
+        from datetime import datetime, timezone
+
+        row = {"ts": ts or datetime.now(timezone.utc).isoformat(timespec="seconds"), "service": service,
+               "version": version, "kind": kind, "author": author, "description": description}
+        with self._lock:
+            self._db.execute("INSERT INTO changes (ts, service, version, kind, author, description) "
+                             "VALUES (:ts, :service, :version, :kind, :author, :description)", row)
+            self._db.commit()
+        return row
 
     def save(self, incident: Incident) -> None:
         with self._lock:

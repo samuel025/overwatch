@@ -214,7 +214,8 @@ def test_evidence_pack_runs_first_and_reaches_the_model(world):
     ow.investigator.llm.chat_json = lambda messages, model, agent: seen.append(messages) or original(messages, model, agent)
     set_value("a", 50)
     inc = ow.handle(ow.watcher.run())
-    assert [e.note for e in inc.pack] == ["[pack] All values"] and len(inc.pack[0].rows) == 2
+    assert [e.note for e in inc.pack] == ["[pack] All values", "[pack] Changes reported to Overwatch in the last hour"]
+    assert len(inc.pack[0].rows) == 2
     assert "Evidence already gathered automatically" in seen[0][1]["content"]
     ow.stop()
 
@@ -285,4 +286,21 @@ def test_timeline_reaches_the_model_and_pack_rows_get_minutes_before_start(world
     assert "Incident timeline" in prompt and "The problem started at" in prompt
     assert "a_high [a]: normal 1 -> now 50 (FIRING)" in prompt
     assert inc.started_at and inc.pack[0].rows[0]["minutes_before_start"] > 0
+    ow.stop()
+
+
+def test_reported_changes_are_queryable_through_the_built_in_source(world):
+    make, _ = world
+    ow = make()
+    ow.record_change("a", "v2.4.0", description="Release 2.4.0")
+    rows = ow.sources["overwatch"].query("SELECT service, version FROM changes")
+    assert rows == [{"service": "a", "version": "v2.4.0"}]
+    import pytest as _pytest
+    from overwatch.sources.base import SourceError
+
+    with _pytest.raises(SourceError):
+        ow.sources["overwatch"].query("DELETE FROM changes")
+    with TestClient(create_app(ow, watch=False)) as c:
+        assert c.post("/api/changes", json={"service": "b", "version": "1.0"}).status_code == 200
+    assert len(ow.sources["overwatch"].query("SELECT * FROM changes")) == 2
     ow.stop()

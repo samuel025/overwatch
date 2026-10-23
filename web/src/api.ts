@@ -22,6 +22,51 @@ export const api = {
   resolve: (id: string) => fetch(`/api/incidents/${id}/resolve`, { method: "POST" }).then(json<unknown>),
 };
 
+export interface SetupState {
+  configured: boolean;
+  config_path: string;
+  docker_available: boolean;
+  docker_projects: string[];
+  ai_configured: boolean;
+  ai_base_url: string;
+  ai_model: string;
+}
+
+export interface PlanCheck {
+  name: string;
+  kind?: string;
+  service: string;
+  description: string;
+  why?: string;
+  enabled: boolean;
+  [key: string]: unknown;
+}
+
+export interface Plan {
+  system: { name: string; description: string };
+  docker: { project?: string; service_label?: string };
+  docker_projects?: string[];
+  services: Record<string, Record<string, string>>;
+  runtime_facts: string;
+  sources: Record<string, { type: string; url: string }>;
+  catalog: string;
+  topology: Record<string, string[]>;
+  checks: PlanCheck[];
+  evidence: { name: string; label: string; source: string; query: string; enabled: boolean }[];
+  notes: string[];
+  errors: string[];
+}
+
+const post = <T,>(path: string, body: unknown) =>
+  fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(json<T>);
+
+export const setupApi = {
+  state: () => fetch("/api/setup/state").then(json<SetupState>),
+  discover: (body: unknown) => post<{ plan: Plan; yaml: string }>("/api/setup/discover", body),
+  testAi: (body: unknown) => post<{ ok: boolean; models?: string[]; error?: string }>("/api/setup/test-ai", body),
+  apply: (body: unknown) => post<{ ok: boolean; config: string; backup: string | null; env: string }>("/api/setup/apply", body),
+};
+
 export async function refreshMemory() {
   try {
     useStore.getState().setMemory(await api.memory());

@@ -1,6 +1,7 @@
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { Toaster, toast } from "sonner";
-import { connect, refreshMemory } from "./api";
+import { connect, refreshMemory, setupApi, type SetupState } from "./api";
+import { Setup } from "./components/Setup";
 import { Header } from "./components/Header";
 import { IncidentView } from "./components/IncidentView";
 import { Agents, Incidents, Signals, UnderTheHood } from "./components/Side";
@@ -37,6 +38,32 @@ function onEvent(e: OwEvent) {
 }
 
 export default function App() {
+  const [setup, setSetup] = useState<SetupState | null>(null);
+  const [showSetup, setShowSetup] = useState(window.location.hash === "#setup");
+
+  useEffect(() => {
+    setupApi.state().then(setSetup).catch(() => setSetup(null));
+    const onHash = () => setShowSetup(window.location.hash === "#setup");
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  if (setup && (!setup.configured || showSetup)) {
+    return (
+      <div className="app">
+        <Setup
+          state={setup}
+          onCancel={setup.configured ? () => { window.location.hash = ""; setShowSetup(false); } : undefined}
+        />
+        <Toaster theme="dark" position="bottom-right" />
+      </div>
+    );
+  }
+  if (!setup) return <div className="app" />;
+  return <Console />;
+}
+
+function Console() {
   // Relative times ("12s ago", "ongoing for 3m") need a periodic re-render.
   const [, rerender] = useReducer((x: number) => x + 1, 0);
   useEffect(() => {

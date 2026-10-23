@@ -87,6 +87,8 @@ class Watcher:
             try:
                 if c.kind == "probe":
                     value: float | None = self._probe(c)
+                elif c.kind == "container":
+                    value = float(self.sources[c.source].running(c.service))
                 else:
                     value = _first_number(self.sources[c.source].query(c.query))
             except SourceError as e:

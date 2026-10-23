@@ -48,6 +48,8 @@ export function Header() {
         </span>
       </div>
 
+      <a className="header-link" href="#setup">Setup</a>
+
       <form className="report" onSubmit={submit}>
         <input
           value={symptom}

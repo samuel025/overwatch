@@ -104,7 +104,7 @@ flowchart LR
 
 1. The Watcher's pass finds `gateway_error_rate = 0.59` above its limit of `0.05`.
 2. If an incident opened in the last few minutes is still open, the alert **joins it** (one cascade = one incident). Otherwise a new incident opens and is handed to the worker pool.
-3. The Historian asks H-MEM for similar past incidents.
+3. The **evidence pack** runs (recent changes, top errors, container state, per-service health...), Overwatch computes the **incident timeline** (when it started, each signal's normal value vs now), and the Historian asks H-MEM for similar past incidents. A **fast model** posts a first guess within seconds.
 4. The Investigator receives: the system description, the list of data sources, the **catalog** (what tables and columns exist), the service **topology**, the anomalies, the similar incidents, and its query budget. It replies with one JSON action at a time:
    ```json
    {"thought": "Errors are all timeouts calling orders. Is orders itself slow?",
@@ -119,7 +119,7 @@ flowchart LR
     "recommended_actions": ["...", "..."]}
    ```
    This JSON-action protocol works with **any** OpenAI-compatible provider, even without native tool calling.
-5. If the model uses its whole query budget, it is told to conclude; if it still does not, the incident is marked **failed** (never offered for approval empty-handed).
+5. The conclusion must list the explanations it considered (confirmed / ruled out, and why), quote the evidence it relied on, and say whether it agrees with the first guess. Overwatch **checks every quote and technical term against the data** (`overwatch/grounding.py`): a conclusion that cites things not in the data cannot claim more than 60% confidence. If the model uses its whole query budget without concluding, the incident is marked **failed** (never offered for approval empty-handed).
 6. Overwatch computes the **blast radius**: start time (walking back through the check history), affected and at-risk services (from the topology), and business cost (from your impact queries).
 7. The console shows the diagnosis; a human approves or dismisses.
 8. When every check behind the incident has stayed healthy for a while, the incident is marked **recovered** and its final duration is recorded.
@@ -270,14 +270,56 @@ Overwatch does not plug into your services. It reads the data they already produ
 
 The more of this you connect, the better the investigations. Through **Zetaris** you can expose all of it as one SQL source.
 
-### Steps
+### Connecting: three ways
+
+You do not have to write the configuration by hand. Tell Overwatch **where things are**; it discovers the rest and writes `overwatch.yaml` (and the secrets into `.env`) for you to review.
+
+**1. The setup page (easiest).** Run Overwatch in a folder with no config yet:
 
 ```bash
-overwatch init overwatch.yaml        # writes a commented starter file
-# edit sources, catalog, checks, topology, impact, notifiers
-overwatch -c overwatch.yaml doctor   # every line should say [ok]
-overwatch -c overwatch.yaml run      # console on http://127.0.0.1:8080
+overwatch run          # no overwatch.yaml here yet -> the console opens on "Connect your system"
 ```
+
+1. **Connect:** Docker is detected automatically (pick the Compose project); optionally add a Prometheus address and any databases or Zetaris; choose an AI provider (one click fills Nightshift or NVIDIA) and **Test connection**.
+2. **Review:** a map of the discovered system, a sentence per service to fill in (TODOs are highlighted: they help the Investigator most), the proposed checks with a reason for each (switch any off), the evidence pack, and a preview of the file it will write.
+3. **Save and start watching:** writes the files and starts watching immediately, no restart. An existing config is kept as a backup. The **Setup** link in the console header brings you back here.
+
+**2. One command:**
+
+```bash
+overwatch connect --docker --project my-shop \
+                  --prometheus http://prometheus:9090 \
+                  --database ops=postgresql://readonly:password@db:5432/ops
+overwatch doctor          # every line should say [ok]
+overwatch run
+```
+
+`--print` shows the generated file without writing it.
+
+**3. By hand:** `overwatch init` writes a commented starter file; see the [configuration reference](#7-configuration-reference).
+
+### What discovery finds
+
+| From | It discovers |
+|---|---|
+| **Docker / Docker Compose** | services (replicas grouped as one), **who calls whom** (Compose's `depends_on` labels), CPU and memory limits, restart policy, **health endpoints** (tries `/health`, `/healthz`, `/ready`, `/status` on published ports), and a liveness check per service |
+| **SQL databases / Zetaris** | every table and column for the catalog; a **change log** (columns like `service` + `version` + a timestamp), **logs** (`level` + `message`) and **metrics** tables (`service` + latency/error columns), turned into per-service latency and error checks; the database's own health views (`pg_stat_activity`, `pg_stat_statements`...) |
+| **Prometheus** | standard request metrics (`http_requests_total`, `http_request_duration_seconds`, OpenTelemetry names) and `up`, turned into per-service latency, error-rate and liveness checks |
+
+Latency checks use **compare-to-normal** (4× the service's own recent median), so nobody has to guess a threshold. Database addresses with passwords and the AI key go into `.env`, never into `overwatch.yaml`.
+
+Discovery cannot see external services (a third-party API your code calls) or what each service is *for*: add those to `topology:` and `services:` yourself. Kubernetes discovery is not supported yet.
+
+### Built in, no setup needed
+
+- **Docker as a data source.** With a `docker:` section, the Investigator can ask Docker directly for container state, a service's recent **logs** (`logs orders 100`, `errors orders`) and recent **container events** (crashes, restarts, OOM kills): no log shipping required. Container deaths are also pushed to Overwatch the instant they happen.
+- **Change log.** Overwatch keeps its own record of releases and config changes. Add one line to your release pipeline:
+  ```bash
+  overwatch change --service orders --version 2.4.0 --description "Release 2.4.0" --url http://overwatch:8080
+  # or: curl -X POST http://overwatch:8080/api/changes -d '{"service":"orders","version":"2.4.0"}'
+  ```
+  It is queryable by the Investigator (built-in `overwatch` source, table `changes`) and part of every evidence pack.
+- **Pushed alerts.** `POST /api/ingest` accepts alerts from any tool, including Prometheus Alertmanager webhooks.
 
 Overwatch can run on any machine that can reach your data; it does not need to run next to your services. The memory service (`memory-service/`) must be running for `memory.type: hmem`.
 
@@ -310,6 +352,33 @@ system:
     Who calls whom, timeouts, normal traffic levels, anything an engineer would tell a newcomer.
 ```
 
+### `docker`: turn on the Docker features
+
+```yaml
+docker:
+  project: my-shop              # Compose project; omit to watch every container
+  service_label: com.docker.compose.service   # label that names the service (default)
+  socket: /var/run/docker.sock
+```
+
+Adds the built-in `docker` data source, `kind: container` checks, the container-event listener, and container state/events in every evidence pack.
+
+### `services` and `runtime_facts`: what a newcomer would be told
+
+```yaml
+services:
+  orders:
+    what: returns a customer's latest orders from shopdb.orders (3M rows)
+    runs_on: one container, 0.5 CPU, 256 MB memory limit, restart policy unless-stopped
+    normal: p95 about 10 ms, errors under 1%
+    known_failures: without the customer_id index every lookup is a full scan
+runtime_facts: |
+  Everything runs on Docker Compose; there is no Kubernetes and no load balancer.
+  Exit code 0 = clean stop, 137 = killed (usually out of memory), 143 = terminated.
+```
+
+Passed to the Investigator as facts. These two sections prevent the most common diagnosis mistakes (assuming infrastructure that does not exist, misreading exit codes). Any keys work under each service.
+
 ### `sources`: where the data lives
 
 ```yaml
@@ -327,6 +396,8 @@ sources:
     url: http://prometheus:9090
     bearer_token: ${PROM_TOKEN}  # optional
 ```
+
+Two sources are always available without configuration: `overwatch` (the built-in change log, SQLite, read-only) and, with a `docker:` section, `docker`.
 
 ### `catalog`
 
@@ -359,7 +430,8 @@ Each check is a query that returns one number (the first numeric column of the f
 | `relative_min` | `0` | …but only when the value is at least this (ignores noise on tiny baselines) |
 | `baseline_minutes` | `30` | Window for the relative baseline |
 | `no_data` | `ignore` | `alert`: a query that returns no value is itself an incident (the service went silent) |
-| `kind` | `metric` | `heartbeat`: when this check fires, the service is shown as **Not responding** |
+| `kind` | `metric` | `heartbeat`: when this check fires, the service is shown as **Not responding**. `probe`: Overwatch calls `url` itself (no `source`/`query`). `container`: number of running Docker containers for `service` (needs `docker:`) |
+| `url`, `timeout_ms` | — / `2000` | For `probe` checks: the health URL and its timeout |
 | `description` | `""` | Human description shown in alerts and reports |
 | `severity` | `medium` | `low`, `medium`, `high`, `critical` |
 
@@ -381,6 +453,31 @@ Example heartbeat (liveness from container state, not from traffic):
 ```
 
 > Base heartbeats on **liveness** (is the process running?), not on traffic. A service that is healthy but receives no requests because something upstream broke would otherwise look dead.
+
+### `evidence`: the evidence pack
+
+```yaml
+evidence:
+  - name: top_errors
+    label: Top error messages in the last 5 minutes
+    source: opsdb
+    query: >
+      SELECT service, left(message, 160) AS message, count(*) AS n FROM app_logs
+      WHERE level = 'ERROR' AND ts > now() - interval '5 minutes' GROUP BY 1, 2 ORDER BY n DESC LIMIT 10
+```
+
+Run in parallel the moment an incident opens (well under a second) and handed to the Investigator, so it starts from the basics instead of spending its first steps fetching them. Timestamped rows are labelled with `minutes_before_start`. Recent changes from the built-in change log, and container state/events (with `docker:`), are always included.
+
+### `events`: pushed event streams
+
+```yaml
+events:
+  - type: docker
+    service_label: com.docker.compose.service
+    filters: {label: ["com.docker.compose.project=my-shop"]}
+```
+
+Implied by a `docker:` section. A dead container shows as **Not responding** on the map at once; an incident opens only if it stays down past `watch.event_grace_seconds`, so routine restarts page nobody.
 
 ### `impact`: business cost of an incident
 
@@ -406,6 +503,8 @@ impact:
 | `merge_window_seconds` | `300` | New alerts join an incident opened this recently instead of opening another |
 | `resolve_after_seconds` | `60` | An incident recovers once all its checks stay healthy this long |
 | `max_parallel_investigations` | `2` | Worker pool size |
+| `confirm_samples` | `2` | A breach must hold this many passes in a row to open an incident; the first bad pass shows as **Possible problem** |
+| `event_grace_seconds` | `8` | A container back up within this time was a restart, not an outage |
 
 ### `llm`: the AI provider
 
@@ -415,9 +514,14 @@ llm:
   api_key: ${LLM_API_KEY}            # or token_file: ~/.../proxy-token
   investigator_model: ${OVERWATCH_MODEL:-meterless/text.deep}
   temperature: 0.1
-  max_steps: 10                      # query budget per investigation
+  max_steps: 8                       # query budget per investigation
+  triage_model: ${OVERWATCH_TRIAGE_MODEL:-meterless/text.fast}   # fast first guess (optional)
+  triage_extra_body:                 # provider options for the fast model, e.g. no long reasoning
+    chat_template_kwargs: {enable_thinking: false}
   headers: {}                        # extra headers, if your provider needs any
 ```
+
+The **fast first guess** answers in seconds from the evidence pack and is shown while the deep investigation runs; the deep investigation must then agree with it or say why not.
 
 Any OpenAI-compatible endpoint works. Overwatch always sends `meterless-app: overwatch` and `meterless-scope: user` (required by Nightshift, harmless elsewhere) and uses a 180-second timeout because a cold model load can take minutes.
 
@@ -465,7 +569,8 @@ state_path: ""                       # SQLite incident store; default <trace_dir
 
 | Variable | Used for |
 |---|---|
-| `LLM_BASE_URL`, `LLM_API_KEY`, `OVERWATCH_MODEL` | AI provider (Nightshift or NVIDIA) |
+| `LLM_BASE_URL`, `LLM_API_KEY`, `OVERWATCH_MODEL`, `OVERWATCH_TRIAGE_MODEL` | AI provider (Nightshift or NVIDIA) |
+| `OW_<SOURCE>_URL` | Database addresses written by discovery |
 | `MEMORY_URL`, `MEMORY_TOKEN` | H-MEM service |
 | `OVERWATCH_TOKEN` | Console/API token |
 | `ZETARIS_URL` | Zetaris SQL endpoint (SQLAlchemy URL) |
@@ -504,6 +609,8 @@ Nightshift runs on Windows (with a dedicated GPU), Apple Silicon Macs and DGX Sp
 | **Agents** | What each agent is doing, in words |
 | **Signals** | Every check grouped by service, with a sparkline and its alert line |
 | **Incidents** | History. Clicking one pins it; **Back to live** follows new incidents again |
+| **Diagnosis details** | The fast **first guess** while investigating; then the explanations considered with verdicts, the evidence quotes with ✓/⚠, and the **evidence check** ("6/6 quotes found in the data") |
+| **Setup** (header link) | The connect → review → start flow described in [Connecting](#connecting-three-ways) |
 | **Under the hood** | Data sources, H-MEM memories and trust ledger, and every AI call (agent, seconds, tokens, provider) |
 
 ### Building the console
@@ -527,11 +634,13 @@ overwatch [-c CONFIG] [--memory {hmem,local,none}] <command>
 
 | Command | What it does |
 |---|---|
+| `overwatch connect [--docker] [--project P] [--service-label L] [--prometheus URL] [--database NAME=URL]... [--print]` | Discover your system and write `overwatch.yaml` + `.env` |
+| `overwatch change --service S [--version V] [--kind deploy\|config\|rollback\|infra] [--description D] [--url URL]` | Report a release or config change to a running Overwatch (for CI) |
 | `overwatch init [path]` | Write a commented starter `overwatch.yaml` |
 | `overwatch -c overwatch.yaml doctor` | Check every source, the AI provider, memory, each check, the impact queries and the topology. Exit code 1 if anything fails |
 | `overwatch -c overwatch.yaml check [-y]` | One Watcher pass; if anything fires, investigate it in the foreground and ask whether to approve (`-y` approves) |
 | `overwatch -c overwatch.yaml investigate "<symptom>" [--service NAME] [-y]` | Investigate a described problem |
-| `overwatch -c overwatch.yaml run [--host H] [--port P] [--insecure]` | Watch continuously and serve the console. Refuses a non-local `--host` without a console token unless `--insecure` |
+| `overwatch -c overwatch.yaml run [--host H] [--port P] [--insecure]` | Watch continuously and serve the console. With no config yet, opens the setup page. Refuses a non-local `--host` without a console token unless `--insecure` |
 
 `--memory` overrides the memory backend for one run (e.g. `--memory none` to see how it does without memory).
 
@@ -551,10 +660,16 @@ All endpoints are under the console's address. When a console token is set, send
 | `POST /api/incidents/{id}/approve` | — | Sends the report; `409` if the incident is not awaiting approval |
 | `POST /api/incidents/{id}/dismiss` | — | Dismisses without sending |
 | `POST /api/incidents/{id}/resolve` | — | Marks it recovered (needed for problems reported by people) |
+| `POST /api/changes` | `{"service", "version"?, "kind"?, "author"?, "description"?, "ts"?}` | Records a release or config change |
+| `POST /api/ingest` | `{"source", "service", "title", "description"}` or an Alertmanager webhook | Opens (or joins) an incident from a pushed alert |
+| `GET /api/setup/state` | — | Whether a config exists; Docker availability and Compose projects |
+| `POST /api/setup/discover` | `{"docker": {"enabled", "project", "service_label"}, "prometheus_url", "databases": [{"name", "url"}]}` | Runs discovery; returns the plan and the YAML it would write |
+| `POST /api/setup/test-ai` | `{"base_url", "api_key"}` | Lists the provider's models |
+| `POST /api/setup/apply` | `{"plan", "ai": {"base_url", "api_key", "model", "triage_model"}}` | Writes `overwatch.yaml` + `.env` and starts watching |
 
 ### Event types
 
-`watch.tick`, `incident.opened`, `incident.updated`, `incident.merged`, `incident.recovered`, `agent.working`, `agent.thinking`, `memory.recalled`, `investigator.thought`, `query.started`, `query.finished`, `investigator.concluded`, `investigator.failed`, `blast_radius.updated`, `responder.sent`, `llm.call`. Each carries `id`, `ts` and type-specific fields (see `web/src/types.ts`).
+`watch.tick`, `service.event`, `change.recorded`, `investigator.hypothesis`, `incident.opened`, `incident.updated`, `incident.merged`, `incident.recovered`, `agent.working`, `agent.thinking`, `memory.recalled`, `investigator.thought`, `query.started`, `query.finished`, `investigator.concluded`, `investigator.failed`, `blast_radius.updated`, `responder.sent`, `llm.call`. Each carries `id`, `ts` and type-specific fields (see `web/src/types.ts`).
 
 ### Memory service API (`memory-service/`, default port 8099)
 
@@ -644,7 +759,7 @@ Run them with the project's Python (`../../../.venv/bin/python` from `scripts/`)
 ### Automated tests
 
 ```bash
-pytest                                       # 69 offline tests: no database, AI or memory service needed
+pytest                                       # 90 offline tests: no database, AI or memory service needed
 cd memory-service && npm run conformance     # official H-MEM conformance suite
 ```
 
@@ -751,6 +866,9 @@ Register it in `SOURCE_TYPES` in `overwatch/sources/__init__.py`.
 | A relative check never fires | It needs about 10 samples older than 2 minutes before it has a baseline ("learning" in the console). |
 | Port 55432 in use | The demo Postgres port is `DEMO_PG_PORT` (default 55432) in `docker-compose.yml`. |
 | Demo shop seems stuck after a fault | `python scripts/inject_fault.py reset`. |
+| Setup page says Docker is not reachable | Overwatch needs read access to `/var/run/docker.sock` (run it as a user in the `docker` group). |
+| Discovery found no checks in a database | It recognises metrics tables by a `service` column plus latency/error columns and a timestamp; add checks for anything else by hand. |
+| Diagnosis shows "⚠ Evidence check" | Some quotes or names in the conclusion were not found in the data; read it with care. Its confidence is capped at 60%. |
 | `.env` values ignored | Overwatch loads the nearest `.env` at or above the config file and in the current folder; check the variable names (`LLM_BASE_URL`, not `NIGHTSHIFT_BASE_URL`). |
 
 ---
@@ -783,10 +901,14 @@ Register it in `SOURCE_TYPES` in `overwatch/sources/__init__.py`.
 ```
 overwatch/                 the product (Python, system-agnostic)
   agents/                  watcher, historian, investigator, responder
-  sources/                 sql (Zetaris / Postgres / any SQLAlchemy), prometheus
+  sources/                 sql (Zetaris / Postgres / any SQLAlchemy), prometheus, docker
   memory/                  hmem client (default), local and none
   notifiers/               console, slack, jira, webhook
-  orchestrator.py          pipeline, incident lifecycle, blast radius
+  discovery/               docker, prometheus, sql discovery; renders overwatch.yaml + .env
+  docker_api.py            read-only Docker Engine client
+  listeners.py             pushed event streams (Docker events)
+  grounding.py             checks a conclusion's quotes and terms against the data
+  orchestrator.py          pipeline, incident lifecycle, blast radius, evidence pack, timeline
   impact.py                start time, spread, business impact
   store.py                 SQLite incident store
   events.py, server.py     event bus, JSON API, server-sent events
