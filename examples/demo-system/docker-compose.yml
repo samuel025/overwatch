@@ -1,0 +1,76 @@
+# Demo target for Overwatch: a small shop (gateway, orders, two payments replicas), Postgres
+# (shopdb + opsdb), the outside world (chaos: card processor, other teams' changes, troublemakers),
+# a container metrics collector and a load generator.
+# Overwatch itself does not depend on any of this; it only reads the databases via its config.
+
+x-service: &service
+  build: ./services
+  restart: unless-stopped
+  cpus: 0.5  # small pods, like a real deployment, so load can actually saturate them
+  ulimits:
+    nofile: 65536
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track=all"]
+    ports: ["${DEMO_PG_PORT:-55432}:5432"]
+    cpus: 1  # a small database server, so a runaway job can actually saturate it
+    labels: { shop.service: postgres, shop.instance: postgres }
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U postgres -d opsdb -c 'select 1 from tickets limit 1'"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+
+  orders:
+    <<: *service
+    environment: { SERVICE: orders, INSTANCE: orders }
+    labels: { shop.service: orders, shop.instance: orders }
+    ports: ["8002:8000"]
+    mem_limit: 256m  # so the memory_leak fault ends in OOM kills and restarts
+
+  payments-a:
+    <<: *service
+    environment: { SERVICE: payments, INSTANCE: payments-a }
+    labels: { shop.service: payments, shop.instance: payments-a }
+    ports: ["8003:8000"]
+
+  payments-b:
+    <<: *service
+    environment: { SERVICE: payments, INSTANCE: payments-b }
+    labels: { shop.service: payments, shop.instance: payments-b }
+    ports: ["8005:8000"]
+
+  gateway:
+    <<: *service
+    environment: { SERVICE: gateway, INSTANCE: gateway }
+    labels: { shop.service: gateway, shop.instance: gateway }
+    ports: ["8001:8000"]
+    depends_on: [orders, payments-a, payments-b]
+
+  chaos:
+    <<: *service
+    cpus: 2
+    command: ["uvicorn", "chaos:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    ports: ["8004:8000"]
+
+  collector:
+    <<: *service
+    cpus: 0.25
+    command: ["python", "collector.py"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # read container stats, like cAdvisor
+
+  loadgen:
+    <<: *service
+    cpus: 1
+    command: ["python", "loadgen.py"]
+    depends_on: [gateway]

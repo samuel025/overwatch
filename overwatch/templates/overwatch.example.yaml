@@ -1,0 +1,113 @@
+# Overwatch configuration. Copy this file, describe YOUR system, then run:
+#   overwatch doctor -c overwatch.yaml
+# Secrets are referenced as ${ENV_VAR} and read from the environment or a .env file next to this file.
+
+system:
+  name: my-shop
+  description: >
+    Online shop. gateway -> orders -> payments, Postgres for orders and payments.
+    Tell the agents what talks to what; it helps them reason about blast radius.
+
+# Where the agents read data. All access is read-only (SELECT/WITH only, row cap, timeout).
+# Recommended: one Zetaris source that federates your databases, logs and change history,
+# so the Investigator can join across them in a single query.
+sources:
+  zetaris:
+    type: zetaris
+    url: ${ZETARIS_URL}          # SQLAlchemy URL for your Zetaris SQL endpoint
+    max_rows: 50
+    timeout_seconds: 15
+  # Direct sources also work, alongside or instead of Zetaris:
+  # appdb:
+  #   type: postgres
+  #   url: postgresql+psycopg://readonly:${APPDB_PASSWORD}@db.internal:5432/app
+  # prom:
+  #   type: prometheus
+  #   url: http://prometheus.internal:9090
+
+# What the Investigator is allowed to query and what it means. Be specific: table names,
+# columns, units. This is the single biggest factor in investigation quality.
+catalog: |
+  zetaris:
+    request_metrics(ts timestamptz, service text, endpoint text, p95_ms float, error_rate float, rps float)
+      one row per service per minute
+    deploys(ts timestamptz, service text, version text, author text, description text)
+    db_query_stats(ts timestamptz, query_id text, query_text text, mean_ms float, calls int)
+    tickets(key text, created timestamptz, title text, status text, resolution text)
+
+# Who calls whom. Used for the blast radius: what a failure in one service puts at risk.
+topology:
+  gateway: [orders, payments]
+  orders: [appdb]
+  payments: [appdb, card-processor.example.com]
+
+# Business cost of an incident, measured from its start. {since} is filled in by Overwatch.
+impact:
+  - name: failed_requests
+    label: Failed checkouts
+    source: zetaris
+    query: >
+      SELECT coalesce(sum(rps * 60 * error_rate), 0) AS value FROM request_metrics
+      WHERE service = 'gateway' AND ts >= {since}
+
+# What the Watcher evaluates every interval. The first numeric column of the first row
+# (or a column named "value") is compared to the threshold.
+checks:
+  - name: orders_p95_latency_ms
+    service: orders
+    source: zetaris
+    query: >
+      SELECT max(p95_ms) AS value FROM request_metrics
+      WHERE service = 'orders' AND ts > now() - interval '2 minutes'
+    comparison: ">"
+    threshold: 500               # fixed limit...
+    relative_factor: 4           # ...or 4x this check's own normal (median of the last 30 min)
+    relative_min: 100            # but never alert below 100ms
+    description: orders p95 latency over the last 2 minutes
+    severity: high
+    no_data: alert               # alert if the query returns no value (the service stopped reporting)
+
+watch:
+  interval_seconds: 30
+  cooldown_seconds: 600          # don't reopen an incident for the same check within this window
+  merge_window_seconds: 300      # alerts this soon after an incident opens join it (one cascade = one incident)
+  resolve_after_seconds: 60      # an incident recovers once its checks stay healthy this long
+  max_parallel_investigations: 2
+
+# Lock the web console (required to serve it beyond localhost).
+console:
+  token: ${OVERWATCH_TOKEN}
+
+# AI provider: Meterless Nightshift (local, OpenAI-compatible). Connect NVIDIA inside Nightshift
+# to route to a Nemotron model. Model ids are Nightshift routing modes or a pinned model id.
+llm:
+  base_url: ${LLM_BASE_URL:-http://127.0.0.1:8088/v1}
+  api_key: ${LLM_API_KEY}  # or token_file: ~/path/to/nightshift/proxy-token
+  investigator_model: ${OVERWATCH_MODEL:-meterless/text.deep}
+  temperature: 0.1
+  max_steps: 8
+
+# Incident memory: the H-MEM engine (memory-service/). `local` and `none` are fallbacks.
+memory:
+  type: hmem
+  url: ${MEMORY_URL:-http://127.0.0.1:8099}
+
+# manual: a human approves in the UI/CLI before anything is sent. auto: send immediately.
+approval: manual
+
+notifiers:
+  - type: console
+  - type: slack
+    enabled: false
+    webhook_url: ${SLACK_WEBHOOK_URL}
+  - type: jira
+    enabled: false
+    base_url: ${JIRA_BASE_URL}     # https://your-site.atlassian.net
+    email: ${JIRA_EMAIL}
+    api_token: ${JIRA_API_TOKEN}
+    project_key: OPS
+    issue_type: Bug
+  # - type: webhook
+  #   url: https://example.internal/overwatch-hook
+
+trace_dir: traces
