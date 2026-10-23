@@ -33,7 +33,9 @@ export function Header() {
       </div>
 
       <div className="stack" aria-label="Powered by">
-        <span className="stack-item" title="Where agents read data">
+        <span className="stack-item" title={status?.data_layer?.backend === "zetaris"
+          ? `Every query the Investigator runs goes through Zetaris. It federates: ${status.data_layer.federated.join(", ") || "nothing yet"}`
+          : "Where agents read data"}>
           <span className="stack-label">Data</span>
           {dataLabel || "…"}
         </span>

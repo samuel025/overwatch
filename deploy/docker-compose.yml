@@ -1,0 +1,26 @@
+# Overwatch's own database: its incident history, change log, check samples and the Docker telemetry it mirrors.
+# When Zetaris is the data layer (the default), this is the Postgres Zetaris reads those tables from.
+#   docker compose -f deploy/docker-compose.yml up -d
+# then put this in .env (the same line is in .env.example):
+#   OVERWATCH_STATE_URL=postgresql+psycopg://overwatch:overwatch@localhost:55433/overwatch
+services:
+  overwatch-state:
+    image: postgres:16-alpine
+    container_name: overwatch_state
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: overwatch
+      POSTGRES_PASSWORD: ${OVERWATCH_STATE_PASSWORD:-overwatch}
+      POSTGRES_DB: overwatch
+    ports:
+      - "55433:5432"   # reachable from Zetaris (it runs in Docker); firewall this port on a shared machine
+    volumes:
+      - overwatch_state:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U overwatch -d overwatch"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  overwatch_state:

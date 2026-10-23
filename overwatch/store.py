@@ -41,12 +41,23 @@ class IncidentStore:
             # Every check's value on every pass, so history survives restarts and can be queried.
             db.execute(text("CREATE TABLE IF NOT EXISTS check_samples (ts TEXT NOT NULL, check_name TEXT NOT NULL, "
                             "service TEXT, value DOUBLE PRECISION, failing INTEGER NOT NULL DEFAULT 0)"))
+            # Docker telemetry (see telemetry.py): recent container state, events and log lines, queryable like the rest.
+            db.execute(text("CREATE TABLE IF NOT EXISTS container_state (ts TEXT NOT NULL, service TEXT, container TEXT, "
+                            "state TEXT, exit_code INTEGER, oom_killed INTEGER, restarts INTEGER, health TEXT, "
+                            "started_at TEXT, finished_at TEXT)"))
+            db.execute(text("CREATE TABLE IF NOT EXISTS container_events (ts TEXT NOT NULL, service TEXT, container TEXT, "
+                            "action TEXT, exit_code TEXT, detail TEXT)"))
+            db.execute(text("CREATE TABLE IF NOT EXISTS container_logs (ts TEXT NOT NULL, service TEXT, container TEXT, "
+                            "line TEXT, important INTEGER NOT NULL DEFAULT 0)"))
         if "ref" not in {c["name"] for c in inspect(self.engine).get_columns("changes")}:
             with self.engine.begin() as db:  # older state files: add the de-duplication key
                 db.execute(text("ALTER TABLE changes ADD COLUMN ref TEXT"))
         with self.engine.begin() as db:
             db.execute(text("CREATE INDEX IF NOT EXISTS changes_ref ON changes (ref)"))
             db.execute(text("CREATE INDEX IF NOT EXISTS check_samples_ts ON check_samples (ts)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS container_state_ts ON container_state (ts)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS container_events_ts ON container_events (ts)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS container_logs_ts ON container_logs (ts)"))
 
     def rows(self, sql: str, **params: Any) -> list[tuple]:
         with self._lock, self.engine.connect() as db:
@@ -73,6 +84,33 @@ class IncidentStore:
             with self._lock, self.engine.begin() as db:
                 db.execute(text("INSERT INTO check_samples (ts, check_name, service, value, failing) "
                                 "VALUES (:ts, :name, :service, :value, :failing)"), rows)
+
+    def _insert(self, table: str, columns: list[str], rows: list[dict[str, Any]]) -> None:
+        if rows:
+            with self._lock, self.engine.begin() as db:
+                db.execute(text(f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(':' + c for c in columns)})"),
+                           [{c: r.get(c) for c in columns} for r in rows])
+
+    def add_container_state(self, rows: list[dict[str, Any]]) -> None:
+        self._insert("container_state", ["ts", "service", "container", "state", "exit_code", "oom_killed", "restarts",
+                                         "health", "started_at", "finished_at"], rows)
+
+    def add_container_events(self, rows: list[dict[str, Any]]) -> None:
+        self._insert("container_events", ["ts", "service", "container", "action", "exit_code", "detail"], rows)
+
+    def add_container_logs(self, rows: list[dict[str, Any]]) -> None:
+        self._insert("container_logs", ["ts", "service", "container", "line", "important"], rows)
+
+    def prune_telemetry(self) -> None:
+        """Short memory on purpose: lines that matter (errors, shutdowns, restarts) 6 hours, the rest 1 hour."""
+        def ago(**kw: int) -> str:
+            return (datetime.now(timezone.utc) - timedelta(**kw)).isoformat(timespec="microseconds")
+
+        with self._lock, self.engine.begin() as db:
+            db.execute(text("DELETE FROM container_logs WHERE important = 0 AND ts < :c"), {"c": ago(hours=1)})
+            db.execute(text("DELETE FROM container_logs WHERE ts < :c"), {"c": ago(hours=6)})
+            db.execute(text("DELETE FROM container_state WHERE ts < :c"), {"c": ago(hours=6)})
+            db.execute(text("DELETE FROM container_events WHERE ts < :c"), {"c": ago(hours=24)})
 
     def prune_samples(self, keep_days: int = 7) -> None:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat(timespec="seconds")

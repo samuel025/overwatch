@@ -47,14 +47,33 @@ class LLM:
                 "Is Nightshift running?"
             ) from e
 
+    RETRY_DELAYS = (4, 12, 30, 60)  # seconds; a rate limit or a blip should not fail a whole investigation
+
+    def _create(self, **kwargs: Any) -> Any:
+        """One model call, retried with backoff on a rate limit (429), a server error or a dropped connection."""
+        import openai
+
+        retryable = (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError, openai.InternalServerError)
+        for attempt, delay in enumerate((*self.RETRY_DELAYS, None)):
+            try:
+                return self.client.chat.completions.create(**kwargs)
+            except retryable as e:
+                if delay is None:
+                    raise
+                wait = delay
+                retry_after = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
+                if retry_after and str(retry_after).isdigit():
+                    wait = max(delay, min(int(retry_after), 90))
+                time.sleep(wait)
+
     def chat(self, messages: list[dict[str, str]], model: str, agent: str, extra_body: dict | None = None) -> str:
         start = time.monotonic()
         try:
-            resp = self.client.chat.completions.create(
-                model=model, messages=messages, temperature=self.cfg.temperature, extra_body=extra_body or None
-            )
+            resp = self._create(model=model, messages=messages, temperature=self.cfg.temperature,
+                                extra_body=extra_body or None)
         except Exception as e:
-            raise LLMError(f"model call failed ({model}): {e}") from e
+            hint = " (the provider is rate limiting; Overwatch retried and gave up)" if "429" in str(e) else ""
+            raise LLMError(f"model call failed ({model}): {e}{hint}") from e
         content = resp.choices[0].message.content or ""
         self._trace(agent, model, messages, content, time.monotonic() - start, resp.usage)
         return content

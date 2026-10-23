@@ -115,6 +115,7 @@ export interface Status {
   checks: Check[];
   history: Record<string, [number, number | null][]>;
   sources: { name: string; language: string; type: string }[];
+  data_layer: { backend: "zetaris" | "direct"; source?: string; federated: string[] };
   interval_seconds: number;
   topology: Record<string, string[]>;
   down: DownMap;

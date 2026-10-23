@@ -383,3 +383,32 @@ def test_events_with_nan_are_valid_json_for_the_browser():
     event = {"type": "incident.updated", "incident": {"evidence": [{"rows": [{"value": float("nan")}, {"value": float("inf")}, {"value": 1.5}]}]}}
     parsed = json.loads(to_json(event), parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))  # a browser rejects NaN
     assert [r["value"] for r in parsed["incident"]["evidence"][0]["rows"]] == [None, None, 1.5]
+
+
+def test_model_calls_are_retried_on_a_rate_limit_then_succeed(monkeypatch):
+    import httpx
+    import openai
+
+    from overwatch.llm import LLM
+
+    class Msg:
+        content = '{"ok": true}'
+
+    class Resp:
+        choices = [type("C", (), {"message": Msg()})()]
+        usage = None
+
+    calls = []
+
+    def create(**kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            raise openai.RateLimitError("slow down", response=httpx.Response(429, request=httpx.Request("POST", "http://x")), body=None)
+        return Resp()
+
+    llm = LLM(make_config().llm, trace_dir="/tmp/ow-test-llm")
+    llm.client = type("Client", (), {"chat": type("Chat", (), {"completions": type("Comp", (), {"create": staticmethod(create)})()})()})()
+    slept = []
+    monkeypatch.setattr("overwatch.llm.time.sleep", slept.append)
+    assert llm.chat_json([{"role": "user", "content": "x"}], "m", "test") == {"ok": True}
+    assert len(calls) == 3 and slept == [4, 12]  # two 429s, backed off, third call went through

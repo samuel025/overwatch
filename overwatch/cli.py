@@ -166,7 +166,15 @@ def cmd_connect(args) -> int:
     if not (docker or args.prometheus or databases):
         print("Nothing to discover: pass --docker, --prometheus URL and/or --database NAME=URL")
         return 2
-    plan = discover(docker, args.prometheus or "", databases)
+    from .datalayer import register, zetaris_env
+
+    plan = discover(docker, args.prometheus or "", databases, zetaris=bool(zetaris_env()))
+    if plan.get("databases") and not args.print:
+        try:
+            register(plan["databases"])
+            print(f"Registered in Zetaris: {', '.join(plan['databases'])}")
+        except Exception as e:
+            print(f"  [!] could not register the databases in Zetaris: {e}")
     for e in plan["errors"]:
         print(f"  [!] {e}")
     if plan["errors"] and not plan["checks"]:

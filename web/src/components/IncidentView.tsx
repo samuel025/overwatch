@@ -274,6 +274,8 @@ function Decision({ incident }: { incident: Incident }) {
 
 function Story({ incident }: { incident: Incident }) {
   const events = useStore((s) => s.events);
+  const sources = useStore((s) => s.status?.sources);
+  const viaZetaris = (name: string) => sources?.find((x) => x.name === name)?.type === "zetaris";
   const { memories, steps, thinking, pack } = buildStory(events, incident);
   const guess = incident.hypothesis && "text" in incident.hypothesis ? incident.hypothesis : null;
   const live = incident.status === "investigating";
@@ -290,7 +292,7 @@ function Story({ incident }: { incident: Incident }) {
             <ul className="pack-list">
               {pack.map((p) => (
                 <li key={p.label}>
-                  <span>{p.label}</span>
+                  <span>{p.label}{viaZetaris(p.source) && <span className="via-badge" title="Ran through Zetaris, the data layer">via Zetaris</span>}</span>
                   <span className="muted small">
                     {!p.done ? <span className="shimmer">running…</span> : p.error ? <span className="err">failed</span> : `${p.count} rows · ${p.ms} ms`}
                   </span>
@@ -343,6 +345,7 @@ function Story({ incident }: { incident: Incident }) {
               <div className="story-query">
                 <span>
                   Looked at <b>{s.query.purpose || "the data"}</b> in {s.query.source}
+                  {viaZetaris(s.query.source) && <span className="via-badge" title="This query ran through Zetaris, the data layer">via Zetaris</span>}
                   {s.query.key && <span className="key-badge">key evidence</span>}
                 </span>
                 <span className="muted small">

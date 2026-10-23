@@ -77,8 +77,8 @@ Reply with exactly ONE JSON object:
  "check_next": "<the one thing that would confirm or refute it>"}"""
 
 
-def _describe_sources(sources: dict[str, DataSource]) -> str:
-    return "\n".join(f"- {name} ({src.language})" for name, src in sources.items())
+def _describe_sources(sources: dict[str, DataSource], hidden: set[str] | frozenset[str] = frozenset()) -> str:
+    return "\n".join(f"- {name} ({src.language})" for name, src in sources.items() if name not in hidden)
 
 
 def _clip(rows: list[dict[str, Any]], limit: int = 3500) -> str:
@@ -94,6 +94,8 @@ class Investigator:
         self.llm = llm
         self.sources = sources
         self.emit = emit or (lambda *_a, **_k: None)
+        # Sources marked `internal: true` serve the Watcher only; the Investigator reaches that data through Zetaris.
+        self.hidden = {n for n, s in cfg.sources.items() if isinstance(s, dict) and s.get("internal")}
 
     def known_text(self) -> str:
         """Everything Overwatch tells the model about the system (also the reference for grounding)."""
@@ -110,7 +112,7 @@ class Investigator:
                 f"- {name}: " + "; ".join(f"{k}: {v}" for k, v in facts.items())
                 for name, facts in cfg.services.items())] if cfg.services else []),
             *([f"Runtime facts:\n{cfg.runtime_facts.strip()}"] if cfg.runtime_facts else []),
-            f"Data sources:\n{_describe_sources(self.sources)}",
+            f"Data sources:\n{_describe_sources(self.sources, self.hidden)}",
             f"Catalog (what you can query):\n{cfg.catalog}",
             *(["Service topology (caller -> services it calls):\n" + "\n".join(
                 f"- {svc} -> {', '.join(deps) or '(nothing)'}" for svc, deps in cfg.topology.items())]
@@ -247,8 +249,9 @@ class Investigator:
     def _run_query(self, action: dict[str, Any]) -> Evidence:
         source, query = str(action.get("source", "")), str(action.get("query", ""))
         ev = Evidence(source=source, query=query, rows=[], note=str(action.get("purpose", "")))
-        if source not in self.sources:
-            ev.error = f"unknown source '{source}'. Available: {', '.join(self.sources)}"
+        visible = [n for n in self.sources if n not in self.hidden or action.get("_pack")]
+        if source not in visible:
+            ev.error = f"unknown source '{source}'. Available: {', '.join(n for n in self.sources if n not in self.hidden)}"
             return ev
         started = time.perf_counter()
         try:

@@ -8,6 +8,7 @@ console's setup page both use these two functions.
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -123,7 +124,14 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
             s = discover_sql(name, url, target="zetaris" if zetaris else "direct")
             if zetaris:
                 plan["databases"][name] = sqlalchemy_url(url)  # registered with Zetaris; the secret goes to .env
-                plan["sources"]["zetaris"] = source_config()
+                if s["dialect"] == "postgresql":  # live internals (sessions, locks, indexes) are not tables Zetaris can register
+                    plan["sources"][f"{name}_live"] = {"type": "postgres", "url": sqlalchemy_url(url)}
+                    direct = discover_sql(name, url, target="direct")  # the live-session evidence only exists there
+                    s["evidence"] = s["evidence"] + [{**e, "source": f"{name}_live"} for e in direct["evidence"]
+                                                     if "pg_stat_activity" in e.get("query", "")]
+                    s["catalog"] += (f"\n  Live Postgres internals are NOT in Zetaris. Query source {name}_live (PostgreSQL SQL) for: "
+                                     "pg_stat_activity (who is connected, what they run and wait on), pg_locks, pg_indexes, "
+                                     "pg_stat_user_tables (seq_scan vs idx_scan), pg_stat_statements (if enabled).")
             else:
                 plan["sources"][name] = {"type": "postgres" if s["dialect"] == "postgresql" else "sql",
                                          "url": sqlalchemy_url(url)}
@@ -141,6 +149,8 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
                                       "dialect": "spark" if zetaris else s["dialect"], **s["logs"]}
         except Exception as e:
             plan["errors"].append(f"Database {name}: {str(e).splitlines()[0]}")
+    if zetaris:
+        _finish_zetaris(plan, prometheus_url, loki)
     internal |= set(plan["services"]) | {h for src in plan["sources"].values() for h in re.findall(r"@([^:/]+)", src.get("url", ""))}
     plan["externals"] = merge_suggestions(env_hits, log_hits, {h.lower() for h in internal})
 
@@ -157,6 +167,31 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
         f"{len(services)} services: {', '.join(services)}. " if services else ""
     ) + "TODO: one or two sentences on what the system does and how requests flow."
     return plan
+
+
+def _finish_zetaris(plan: dict[str, Any], prometheus_url: str, loki: dict[str, Any] | None) -> None:
+    """Zetaris is the data layer: it is always a source, it reads Prometheus and Loki itself (promql / logql), and the
+    sources it covers become internal, so the Investigator asks Zetaris and the Watcher keeps its fast direct path."""
+    rest: dict[str, Any] = {}
+    if prometheus_url and "prom" in plan["sources"]:
+        rest["prometheus"] = prometheus_url
+        plan["sources"]["prom"]["internal"] = True
+        plan["catalog"] = [c.replace("prom (PromQL, instant queries;", "zetaris, command `promql <expression>` (PromQL instant queries;")
+                           for c in plan["catalog"]]
+    if loki and loki.get("url") and "loki" in plan["sources"]:
+        rest["loki"] = loki["url"]
+        if loki.get("tenant"):
+            rest["loki_headers"] = {"X-Scope-OrgID": loki["tenant"]}
+        plan["sources"]["loki"]["internal"] = True
+        plan["catalog"] = [c.replace("loki (Loki, LogQL)", "zetaris, command `logql <expression>` (Loki, LogQL)") for c in plan["catalog"]]
+    plan["sources"]["zetaris"] = {**source_config(), **({"rest": rest} if rest else {})}
+    if plan.get("docker"):
+        plan["docker"]["internal"] = True  # container state, events and logs are mirrored into Zetaris tables
+    plan["zetaris"] = True
+    plan["state_url"] = "${OVERWATCH_STATE_URL}"
+    if not os.environ.get("OVERWATCH_STATE_URL"):
+        plan["errors"].append("Zetaris is the data layer, so Overwatch needs a Postgres of its own for its history and "
+                              "telemetry: set OVERWATCH_STATE_URL (the bundled docker-compose in deploy/ provides one).")
 
 
 class _Literal(str):
@@ -292,6 +327,10 @@ def render(plan: dict[str, Any], llm: dict[str, str] | None = None) -> tuple[str
     doc["services"] = services
     if plan.get("runtime_facts"):
         doc["runtime_facts"] = _lit(plan["runtime_facts"])
+    if plan.get("state_url"):
+        doc["state_url"] = plan["state_url"]
+    if plan.get("databases"):  # the data layer re-registers these at every start, so a restarted Zetaris heals itself
+        doc["register"] = {name: f"${{{_env_name(name)}}}" for name in plan["databases"]}
     if sources:
         doc["sources"] = sources
     if plan.get("catalog"):

@@ -19,6 +19,7 @@ from typing import Any, Callable
 from .agents import Historian, Investigator, Responder, Watcher
 from .config import Config, EvidenceConfig
 from .events import EventBus
+from .telemetry import DockerTelemetry
 from .impact import incident_start, measure, spread, timestamp_literal
 from .listeners import LISTENER_TYPES
 from .llm import LLM
@@ -68,9 +69,17 @@ class Overwatch:
         ]
         self.listeners += build_feeds(cfg.changes, self._record_feed_change, self.sources,
                                       on_error=lambda msg: self.events.emit("source.error", message=msg))
+        docker_cfg = self._docker_config(cfg)
+        if self.own_data["dialect"] == "spark" and docker_cfg is not None:  # Zetaris cannot reach Docker: mirror it
+            self.listeners.append(DockerTelemetry(self.store, docker_cfg, on_error=lambda m: self.events.emit("source.error", message=m)))
         self._restore()
         self._last_prune = 0.0
         self._register_own_data()
+
+    @staticmethod
+    def _docker_config(cfg: Config) -> dict[str, Any] | None:
+        src = next((s for s in cfg.sources.values() if s.get("type") == "docker"), None)
+        return {**(cfg.docker or {}), **(src or {})} if (src or cfg.docker) else None
 
     def _own_data_target(self, cfg: Config) -> dict[str, str]:
         """Where the Investigator reads Overwatch's own history: the source, the table prefix and the SQL dialect.
@@ -87,15 +96,18 @@ class Overwatch:
         return {"source": "overwatch", "prefix": "", "dialect": "postgresql"}
 
     def _register_own_data(self) -> None:
-        """With Zetaris as the data layer, register Overwatch's own database there (once; safe to repeat)."""
-        if self.own_data["dialect"] != "spark":
-            return
-        from .datalayer import register
+        """With Zetaris as the data layer, register the user's databases and Overwatch's own (safe to repeat)."""
+        from .datalayer import register, zetaris_env
 
+        databases = dict(self.cfg.register)
+        if self.own_data["dialect"] == "spark":
+            databases["overwatch"] = self.store.url
+        if not databases or not zetaris_env():
+            return
         try:
-            register({"overwatch": self.store.url})
-        except Exception as e:  # already registered, or Zetaris is down: the console shows it, watching goes on
-            self.events.emit("source.error", message=f"registering Overwatch's own data with Zetaris: {e}")
+            register(databases)
+        except Exception as e:  # Zetaris is down or unreachable: the console shows it, watching goes on
+            self.events.emit("source.error", message=f"registering databases with Zetaris: {e}")
 
     def _with_builtin_sources(self, cfg: Config) -> dict[str, dict[str, Any]]:
         """Add the read-only `overwatch` change log (and describe the built-ins) so they work with no setup."""
@@ -122,7 +134,17 @@ class Overwatch:
             f"config change reported to or learned by Overwatch. {p}check_samples(ts TEXT ISO-8601 UTC, check_name, "
             f"service, value, failing 0/1): every check's value on every pass for the last 7 days. {where}"
         )
-        if any(s.get("type") == "docker" for s in sources.values()) and "docker:" not in cfg.catalog:
+        if any(s.get("type") == "docker" for s in sources.values()) and own["dialect"] == "spark":
+            notes.append(
+                f"Docker, as tables (recent, refreshed every ~10 s): {p}container_state(ts, service, container, state "
+                f"running/exited, exit_code, oom_killed 0/1, restarts, health, started_at, finished_at): one row per "
+                f"container per sample, so use the newest ts for 'now'. {p}container_events(ts, service, container, "
+                f"action die/start/kill/stop/oom/restart, exit_code, detail): a `kill` row with a signal means someone "
+                f"asked Docker to stop the container; a `die` with no preceding `kill` and a non-zero exit is a crash. "
+                f"{p}container_logs(ts, service, container, line, important 0/1): recent log lines (important = errors, "
+                f"warnings, shutdowns, restarts). All are in Zetaris and join with everything else."
+            )
+        elif any(s.get("type") == "docker" for s in sources.values()) and "docker:" not in cfg.catalog:
             notes.append(
                 "docker (built in, commands not SQL): `containers` (state, exit_code, oom_killed, restarts, limits), "
                 "`logs <service> [lines]`, `errors <service> [lines]`, `events [minutes]` (die/start/oom/kill)"
@@ -152,7 +174,22 @@ class Overwatch:
             f"WHERE {column} > {window} ORDER BY ts DESC LIMIT 20")]
         docker = next((n for n, s in cfg.sources.items() if s.get("type") == "docker"), None) or (
             "docker" if cfg.docker else None)
-        if docker:
+        if docker and own["dialect"] == "spark":
+            p = own["prefix"]
+            defaults += [
+                EvidenceConfig("containers_now", "Container state now", own["source"],
+                               "SELECT service, container, state, exit_code, oom_killed, restarts, health, started_at, "
+                               "finished_at FROM (SELECT *, row_number() OVER (PARTITION BY container ORDER BY ts DESC) "
+                               f"AS rn FROM {p}container_state WHERE to_timestamp(ts) > current_timestamp() - INTERVAL "
+                               "10 MINUTES) WHERE rn = 1 ORDER BY container"),
+                EvidenceConfig("container_events", "Container events in the last 30 minutes", own["source"],
+                               f"SELECT ts, service, container, action, exit_code, detail FROM {p}container_events WHERE "
+                               "to_timestamp(ts) > current_timestamp() - INTERVAL 30 MINUTES ORDER BY ts DESC LIMIT 40"),
+                EvidenceConfig("container_log_highlights", "Important container log lines in the last 10 minutes",
+                               own["source"],
+                               f"SELECT ts, service, container, line FROM {p}container_logs WHERE important = 1 AND "
+                               "to_timestamp(ts) > current_timestamp() - INTERVAL 10 MINUTES ORDER BY ts DESC LIMIT 40")]
+        elif docker:
             defaults += [EvidenceConfig("containers_now", "Container state now", docker, "containers"),
                          EvidenceConfig("container_events", "Container events in the last 30 minutes", docker, "events 30")]
         kube = next((n for n, s in cfg.sources.items() if s.get("type") == "kubernetes"), None)
@@ -276,7 +313,7 @@ class Overwatch:
             query = item.query.replace("{since}", timestamp_literal(since, self.sources[item.source]))
             self.events.emit("query.started", incident=incident.id, step=0, source=item.source, query=query,
                              purpose=item.label)
-            ev = self.investigator._run_query({"source": item.source, "query": query, "purpose": item.label})
+            ev = self.investigator._run_query({"source": item.source, "query": query, "purpose": item.label, "_pack": True})
             ev.note = f"[pack] {item.label}"
             self.events.emit("query.finished", incident=incident.id, step=0, source=ev.source, error=ev.error,
                              row_count=len(ev.rows), rows=ev.rows[:5], ms=ev.ms, purpose=item.label)
@@ -466,6 +503,19 @@ class Overwatch:
 
     # -- state --------------------------------------------------------------------
 
+    def data_layer(self) -> dict[str, Any]:
+        """What the Investigator's queries go through, for the console: Zetaris and everything it federates."""
+        zet = next((n for n, s in self.cfg.sources.items() if s.get("type") == "zetaris"), None)
+        if not zet:
+            return {"backend": "direct", "federated": []}
+        rest = self.cfg.sources[zet].get("rest") or {}
+        federated = [f"{n} (database)" for n in self.cfg.register]
+        federated += ["overwatch (history and telemetry)"] if self.own_data["dialect"] == "spark" else []
+        federated += [f"{n} (via {'promql' if n == 'prometheus' else 'logql'})" for n in ("prometheus", "loki") if rest.get(n)]
+        if self.own_data["dialect"] == "spark" and self._docker_config(self.cfg) is not None:
+            federated.append("docker (containers, events, logs)")
+        return {"backend": "zetaris", "source": zet, "federated": federated}
+
     def status(self) -> dict[str, Any]:
         with self.lock:
             return {
@@ -492,6 +542,7 @@ class Overwatch:
                 "history": {name: list(points) for name, points in self.watcher.history.items()},
                 "sources": [{"name": n, "language": s.language, "type": s.cfg.get("type", "sql")}
                             for n, s in self.sources.items()],
+                "data_layer": self.data_layer(),
                 "interval_seconds": self.cfg.interval_seconds,
                 "topology": self.cfg.topology,
                 "down": dict(self.down),

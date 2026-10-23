@@ -339,18 +339,27 @@ In the demo shop, payments reaches the card processor through `PROVIDER_URL=http
 
 Discovery still cannot know what each service is *for*: fill in the one-line descriptions. Kubernetes discovery is not supported yet.
 
-### The data layer
+### The data layer: Zetaris
 
-Overwatch reads everything through one data layer with two backends:
+Zetaris is Overwatch's data layer. The user never configures it: they connect their systems on the setup page, and Overwatch registers what it needs in Zetaris. From then on **every query the Investigator runs goes through Zetaris**.
 
-- **`direct`** (today's default): every connected database is its own source.
-- **`zetaris`**: set when the deployment's environment has `ZETARIS_JDBC_URL`. The setup page is unchanged for the user, but when they save, Overwatch registers each database they connected in Zetaris (`CREATE DATASOURCE … OPTIONS (jdbcurl …)` then `REGISTER DATASOURCE TABLES FROM …`), writes the generated checks and evidence as Spark SQL over `<datasource>.<table>`, and the agents query only Zetaris. The user's database address is kept in `.env` (`OW_<NAME>_URL`) so it can be registered again.
+| What the Investigator asks about | How it reaches Zetaris |
+|---|---|
+| The user's databases (orders, accounts, deploys...) | Registered as Zetaris datasources over JDBC (`CREATE DATASOURCE`, `REGISTER DATASOURCE TABLES`); queried as `<name>.<table>` in Spark SQL. |
+| Overwatch's own history: changes, incidents, every check's value | Overwatch's Postgres (`OVERWATCH_STATE_URL`, provided by `deploy/docker-compose.yml`), registered as datasource `overwatch`. |
+| Docker containers: state, events, log lines | Docker speaks a socket Zetaris cannot reach, so Overwatch mirrors a short, bounded window (state and events 6-24 h, important log lines 6 h, routine lines 1 h) into that same Postgres: `overwatch.container_state`, `container_events`, `container_logs`. |
+| Prometheus and Loki | Zetaris reads their HTTP APIs itself: the Investigator writes `promql <expression>` or `logql <expression>` and Overwatch turns it into a Zetaris REST table (`CREATE LIGHTNING REST TABLE`) plus a flattening view. Empty, scalar, vector, matrix and log-stream answers are all handled. |
 
-Zetaris is reached over JDBC with Zetaris's own driver (Java and `pip install overwatch[zetaris]`). Only Overwatch's setup flow can run registration statements; the agents can only run `SELECT`, `WITH`, `SHOW` and `DESCRIBE`. Docker, Kubernetes and Loki stay direct sources next to it.
+So one SQL query can join "payments per minute before and after each deploy" (history plus the user's database), or a container restart with the log lines around it. The sources Zetaris covers are marked `internal: true` in the generated config: the **Watcher** keeps its fast direct path for checks (monitoring should not depend on a heavier path), but the **Investigator is only offered Zetaris** (plus live Postgres internals such as `pg_stat_activity`, which are not tables and stay on a direct `<db>_live` source). The console tags every query "via Zetaris" and lists what Zetaris federates in the header.
 
-**Overwatch's own history goes through the data layer too.** Every install has data of its own, whatever stack the user has: the change log, incident history, and the value of every check on every pass (`check_samples`, kept 7 days, so baselines and history survive restarts). By default these live in a SQLite file. Set `state_url` (or `OVERWATCH_STATE_URL`) to a Postgres database and Overwatch keeps them there instead; when Zetaris is the data layer, Overwatch registers that database as the datasource `overwatch` on startup, so one query can join "what changed" and "how the metric moved" with the user's own tables (`overwatch.changes`, `overwatch.check_samples`). The change-log evidence and the catalog the Investigator reads switch to Spark SQL automatically. This is written from Zetaris's documentation and not yet run against a real Zetaris; the time comparison (`to_timestamp(ts)`) in particular is unverified.
+Details:
 
-Business-impact queries (`impact:`) and any checks over the user's own tables are ordinary SQL sources, so pointing them at the `zetaris` source (with `<datasource>.<table>` names and Spark SQL) puts them through the data layer as well.
+- Zetaris is the intended data layer: set `ZETARIS_JDBC_URL` (and the other `ZETARIS_*` variables, see `.env.example`) and everything above applies. Without them Overwatch still starts, in a `direct` development mode (each database its own source, Docker commands answered live), and the console's *Data* chip shows the individual sources instead of Zetaris. That fallback exists for development and tests; it is not the product.
+- Zetaris is reached over JDBC with its own driver (Java and `pip install overwatch[zetaris]`). Only Overwatch's setup and startup flow runs DDL; agents can only run `SELECT`, `WITH`, `SHOW`, `DESCRIBE` and the `promql`/`logql` commands, whose expressions are percent-encoded so nothing an agent sends can change a statement.
+- Databases are re-registered at every start (`register:` in the config), so a restarted Zetaris heals itself.
+- If Zetaris runs in Docker on Linux, set `ZETARIS_HOST_ALIAS=172.17.0.1` so it can reach `localhost` services (databases, Prometheus).
+- Not yet through Zetaris: Kubernetes (it needs a bearer-token REST source; written against the docs but untested without a cluster). Raw log tailing for Kubernetes and Loki stays on live sources.
+
 
 ### Built in, no setup needed
 

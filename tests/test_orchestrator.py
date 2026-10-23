@@ -328,3 +328,28 @@ def test_own_history_is_read_through_zetaris_when_it_is_the_data_layer(world, mo
     monkeypatch.setenv("ZETARIS_JDBC_URL", "jdbc:zetaris://x")
     ow.cfg.sources["zetaris"] = {"type": "zetaris", "jdbc_url": "jdbc:zetaris://x", "driver_class": "com.Z"}
     assert ow._own_data_target(ow.cfg) == {"source": "zetaris", "prefix": "overwatch.", "dialect": "spark"}
+
+
+def test_docker_telemetry_is_stored_as_tables_and_pruned(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from overwatch.store import IncidentStore
+    from overwatch.telemetry import iso
+
+    assert iso("2026-10-23T19:10:40.105317044Z") == "2026-10-23T19:10:40.105317+00:00"
+    store = IncidentStore(tmp_path / "o.db")
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="microseconds")
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    store.add_container_logs([
+        {"ts": old, "service": "db", "container": "db", "line": "checkpoint complete", "important": 0},
+        {"ts": old, "service": "db", "container": "db", "line": "received fast shutdown request", "important": 1},
+        {"ts": now, "service": "db", "container": "db", "line": "ready", "important": 0}])
+    store.add_container_state([{"ts": now, "service": "db", "container": "db", "state": "exited", "exit_code": 0,
+                                "oom_killed": 0, "restarts": 0, "health": None, "started_at": now, "finished_at": now}])
+    store.add_container_events([{"ts": now, "service": "db", "container": "db", "action": "kill", "exit_code": None,
+                                 "detail": "signal 15"}])
+    store.prune_telemetry()
+    lines = [r[0] for r in store.rows("SELECT line FROM container_logs ORDER BY ts, line")]
+    assert lines == ["received fast shutdown request", "ready"]  # routine lines expire after an hour, important ones last
+    assert store.rows("SELECT state FROM container_state") == [("exited",)]
+    assert store.rows("SELECT detail FROM container_events") == [("signal 15",)]

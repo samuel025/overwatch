@@ -27,6 +27,15 @@ head = head.replace(
     "# Zetaris is the data layer: shopdb + opsdb are registered in it and one query can join metrics,\n"
     "# deploys and business tables. Run `python scripts/register_zetaris.py` once first.")
 
+registration = '''
+# Overwatch's own history lives in its Postgres (deploy/docker-compose.yml); Zetaris reads it from there. The demo
+# databases are registered in Zetaris at every start, so a restarted Zetaris heals itself.
+state_url: ${OVERWATCH_STATE_URL}
+register:
+  opsdb: postgresql+psycopg://overwatch_ro:overwatch_ro@localhost:55432/opsdb
+  shopdb: postgresql+psycopg://overwatch_ro:overwatch_ro@localhost:55432/shopdb
+'''
+
 sources = '''
 sources:
   zetaris:
@@ -116,6 +125,6 @@ cross = """  - name: deploys_vs_payments
 assert "  - name: top_errors" in tail
 tail = tail.replace("  - name: top_errors", cross + "  - name: top_errors", 1)
 
-out = head + sources + catalog_zetaris + tail
+out = head + registration + sources + catalog_zetaris + tail
 (root / "overwatch.zetaris.yaml").write_text(out)
 print("wrote", root / "overwatch.zetaris.yaml")
