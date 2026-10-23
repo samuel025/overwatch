@@ -60,6 +60,7 @@ catalog: |
   shopdb (application database):
     shopdb.orders(id, customer_id, amount, status, created_at), shopdb.customers(id, name, created_at),
     shopdb.payments(id, order_id, amount, status, created_at)
+    A query can join across the two databases, e.g. opsdb.deploys with shopdb.payments to see what a release did to payments.
     shopdb.pg_stat_statements(query, calls, mean_exec_time, total_exec_time, rows)
   Live Postgres internals are NOT in Zetaris. Query them with source shopdb_live (Postgres SQL):
       pg_indexes(schemaname, tablename, indexname, indexdef)
@@ -83,11 +84,37 @@ def interval(m: re.Match) -> str:
 tail = re.sub(r"now\(\) - interval '(\d+) (second|minute|hour|day)s?'", interval, tail)
 tail = re.sub(r"now\(\) - interval '(\d+) (second|minute|hour|day)s?'", interval, tail)
 tail = tail.replace("::numeric", "")
+# Spark SQL has no DISTINCT ON: take the newest row per instance with a window function
+distinct_on = (
+    "SELECT DISTINCT ON (instance) instance, status, restarts, oom_killed,\n"
+    "        round(cpu_pct, 1) AS cpu_pct, round(mem_mb) AS mem_mb, mem_limit_mb\n"
+    "      FROM container_metrics WHERE ts > now() - interval '1 minute' ORDER BY instance, ts DESC")
+assert distinct_on.replace("now() - interval '1 minute'", "current_timestamp() - INTERVAL 1 MINUTE") in tail
+tail = tail.replace(
+    distinct_on.replace("now() - interval '1 minute'", "current_timestamp() - INTERVAL 1 MINUTE"),
+    "SELECT instance, status, restarts, oom_killed, round(cpu_pct, 1) AS cpu_pct, round(mem_mb) AS mem_mb, mem_limit_mb\n"
+    "      FROM (SELECT *, row_number() OVER (PARTITION BY instance ORDER BY ts DESC) AS rn FROM opsdb.container_metrics\n"
+    "            WHERE ts > current_timestamp() - INTERVAL 1 MINUTE) WHERE rn = 1 ORDER BY instance")
 tail = re.sub(r"\b(FROM|JOIN)\s+(request_metrics|app_logs|container_metrics|deploys|tickets)\b", r"\1 opsdb.\2", tail)
 # live-database sessions stay on Postgres
 tail = re.sub(r"(name: db_activity\n(?:.*\n)*?\s+source: )shopdb\b", r"\1shopdb_live", tail)
 tail = re.sub(r"(\n\s+source: )(opsdb|shopdb)\b", r"\1zetaris", tail)
 tail = tail.replace("zetaris\n    query: >\n      SELECT application_name", "shopdb_live\n    query: >\n      SELECT application_name")
+
+# The Zetaris-only evidence: one query across both databases (deploys live in opsdb, payments in shopdb).
+cross = """  - name: deploys_vs_payments
+    label: Payments per minute before and after each recent change (joins opsdb.deploys with shopdb.payments)
+    source: zetaris
+    query: >
+      SELECT d.ts AS deployed_at, d.service, d.version,
+        round(sum(CASE WHEN p.created_at >= d.ts - INTERVAL 5 MINUTES AND p.created_at < d.ts THEN 1 ELSE 0 END) / 5.0, 1) AS payments_per_min_before,
+        round(sum(CASE WHEN p.created_at >= d.ts AND p.created_at < d.ts + INTERVAL 5 MINUTES THEN 1 ELSE 0 END) / 5.0, 1) AS payments_per_min_after
+      FROM opsdb.deploys d CROSS JOIN shopdb.payments p
+      WHERE d.ts > current_timestamp() - INTERVAL 30 MINUTES AND p.created_at > current_timestamp() - INTERVAL 40 MINUTES
+      GROUP BY d.ts, d.service, d.version ORDER BY d.ts DESC LIMIT 8
+"""
+assert "  - name: top_errors" in tail
+tail = tail.replace("  - name: top_errors", cross + "  - name: top_errors", 1)
 
 out = head + sources + catalog_zetaris + tail
 (root / "overwatch.zetaris.yaml").write_text(out)

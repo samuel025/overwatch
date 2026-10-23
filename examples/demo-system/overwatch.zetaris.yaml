@@ -77,6 +77,7 @@ catalog: |
   shopdb (application database):
     shopdb.orders(id, customer_id, amount, status, created_at), shopdb.customers(id, name, created_at),
     shopdb.payments(id, order_id, amount, status, created_at)
+    A query can join across the two databases, e.g. opsdb.deploys with shopdb.payments to see what a release did to payments.
     shopdb.pg_stat_statements(query, calls, mean_exec_time, total_exec_time, rows)
   Live Postgres internals are NOT in Zetaris. Query them with source shopdb_live (Postgres SQL):
       pg_indexes(schemaname, tablename, indexname, indexdef)
@@ -123,6 +124,16 @@ evidence:
     query: >
       SELECT ts, service, version, description FROM opsdb.deploys
       WHERE ts > current_timestamp() - INTERVAL 30 MINUTE ORDER BY ts DESC LIMIT 15
+  - name: deploys_vs_payments
+    label: Payments per minute before and after each recent change (joins opsdb.deploys with shopdb.payments)
+    source: zetaris
+    query: >
+      SELECT d.ts AS deployed_at, d.service, d.version,
+        round(sum(CASE WHEN p.created_at >= d.ts - INTERVAL 5 MINUTES AND p.created_at < d.ts THEN 1 ELSE 0 END) / 5.0, 1) AS payments_per_min_before,
+        round(sum(CASE WHEN p.created_at >= d.ts AND p.created_at < d.ts + INTERVAL 5 MINUTES THEN 1 ELSE 0 END) / 5.0, 1) AS payments_per_min_after
+      FROM opsdb.deploys d CROSS JOIN shopdb.payments p
+      WHERE d.ts > current_timestamp() - INTERVAL 30 MINUTES AND p.created_at > current_timestamp() - INTERVAL 40 MINUTES
+      GROUP BY d.ts, d.service, d.version ORDER BY d.ts DESC LIMIT 8
   - name: top_errors
     label: Top error messages in the last 5 minutes
     source: zetaris
@@ -145,9 +156,9 @@ evidence:
     label: Container state now
     source: zetaris
     query: >
-      SELECT DISTINCT ON (instance) instance, status, restarts, oom_killed,
-        round(cpu_pct, 1) AS cpu_pct, round(mem_mb) AS mem_mb, mem_limit_mb
-      FROM opsdb.container_metrics WHERE ts > current_timestamp() - INTERVAL 1 MINUTE ORDER BY instance, ts DESC
+      SELECT instance, status, restarts, oom_killed, round(cpu_pct, 1) AS cpu_pct, round(mem_mb) AS mem_mb, mem_limit_mb
+      FROM (SELECT *, row_number() OVER (PARTITION BY instance ORDER BY ts DESC) AS rn FROM opsdb.container_metrics
+            WHERE ts > current_timestamp() - INTERVAL 1 MINUTE) WHERE rn = 1 ORDER BY instance
   - name: db_activity
     label: Database sessions that are busy or waiting
     source: shopdb_live
