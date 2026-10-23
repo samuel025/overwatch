@@ -209,7 +209,7 @@ FAULTS: dict[str, Fault] = {f.name: f for f in [
     Fault("config_timeout", "Overly aggressive timeout", "config", "watcher",
           "config-81 lowered gateway->orders timeout to 4ms; orders itself is healthy (~10ms p95) but the gateway "
           "fails a large share of checkouts with upstream timeouts to orders.",
-          [["timeout"], ["config-81", "config", "4ms", "4 ms"]], _config_timeout,
+          [["timeout"], ["config-81", "config", "4ms", "4 ms"]], _config_timeout, settle_seconds=75,
           note="The service in the error message (orders) is not the one at fault."),
     Fault("retry_storm", "Retries amplify a failure", "compound", "watcher",
           "payments started failing ~50% and gateway v3.2.0's immediate retries (up to 4, no backoff) multiply "
@@ -272,9 +272,19 @@ FAULTS: dict[str, Fault] = {f.name: f for f in [
 ]}
 
 
+def _injected_deploys() -> list[tuple[str, str]]:
+    """(service, version) of every deploy a fault records, read from this file's own deploy(...) calls."""
+    import re
+    return sorted(set(re.findall(r'\bdeploy\("([^"]+)",\s*"([^"]+)"', Path(__file__).read_text())))
+
+
 def reset() -> None:
     compose("start", "postgres")
     wait_for_db()
+    # Faults record a deploy/config change; leaving them behind would mislead the next investigation
+    # (it looks at the last 30 minutes of changes), so the next fault would blame the previous one.
+    for service, version in _injected_deploys():
+        sql("opsdb", "DELETE FROM deploys WHERE service = %s AND version = %s", (service, version))
     compose("start")  # anything a fault stopped (service_down)
     # Fresh processes: drops stale DB connections (after database_down), leaked memory and connections.
     compose("restart", "gateway", "orders", "payments-a", "payments-b")
@@ -282,6 +292,8 @@ def reset() -> None:
     sql("shopdb", "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                   "WHERE application_name IN ('inventory-sync', 'nightly-revenue-report')")
     sql("shopdb", "CREATE INDEX IF NOT EXISTS orders_customer_id_idx ON orders (customer_id)")
+    # Cumulative query statistics would still show the previous fault (e.g. an earlier DROP INDEX).
+    sql("shopdb", "SELECT pg_stat_statements_reset()")
     for instance in INSTANCES:
         for _ in range(30):  # instances take a moment to come back after the restart
             try:

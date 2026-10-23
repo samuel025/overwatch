@@ -116,9 +116,11 @@ def main() -> None:
     p.add_argument("faults", nargs="*", default=list(FAULTS))
     p.add_argument("--modes", nargs="+", default=["hmem", "none"], choices=["hmem", "none"])
     p.add_argument("--out", default=str(ROOT / "eval" / "results.md"))
+    p.add_argument("--config", default=str(DEMO / "overwatch.yaml"),
+                   help="e.g. examples/demo-system/overwatch.zetaris.yaml to run every query through Zetaris")
     args = p.parse_args()
 
-    cfg = load_config(DEMO / "overwatch.yaml")
+    cfg = load_config(args.config)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     trace_dir = ROOT / "eval" / "traces" / stamp
     results: list[dict] = []
