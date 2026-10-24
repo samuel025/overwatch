@@ -276,7 +276,9 @@ class Overwatch:
                     self.ingest([Anomaly(f"event:{instance}_down", service, None, 0.0, "event", detail)])
 
             if self.cfg.event_grace_seconds > 0:
-                threading.Timer(self.cfg.event_grace_seconds, still_down).start()
+                timer = threading.Timer(self.cfg.event_grace_seconds, still_down)
+                timer.daemon = True  # a pending grace timer must not hold a stopping process open
+                timer.start()
             else:
                 still_down()
         else:
@@ -500,6 +502,11 @@ class Overwatch:
             if hasattr(listener, "stop"):
                 listener.stop()
         self.pool.shutdown(wait=False, cancel_futures=True)
+        for source in self.sources.values():  # an open Zetaris (Java) connection keeps the process from exiting
+            try:
+                source.close()
+            except Exception:
+                pass
 
     # -- state --------------------------------------------------------------------
 

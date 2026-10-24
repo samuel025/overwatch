@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -237,6 +238,17 @@ def cmd_init(path: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    code = _main(argv)
+    if argv is None:  # run as the `overwatch` program
+        # A finished command must exit now. Worker threads (an investigation mid-call) and the Java bridge to Zetaris
+        # would otherwise keep a stopped process alive for minutes, so Ctrl+C looked like a hang.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
+    return code
+
+
+def _main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="overwatch", description="Multi-agent incident investigator")
     p.add_argument("-c", "--config", default="overwatch.yaml")
     p.add_argument("--memory", choices=["hmem", "local", "none"], help="override the memory backend")

@@ -353,3 +353,12 @@ def test_docker_telemetry_is_stored_as_tables_and_pruned(tmp_path):
     assert lines == ["received fast shutdown request", "ready"]  # routine lines expire after an hour, important ones last
     assert store.rows("SELECT state FROM container_state") == [("exited",)]
     assert store.rows("SELECT detail FROM container_events") == [("signal 15",)]
+
+
+def test_stopping_overwatch_closes_its_data_sources(world):
+    make, _ = world
+    ow = make()
+    closed = []
+    ow.sources["db"].close = lambda: closed.append("db")  # a Zetaris source holds a Java connection that blocks exit
+    ow.stop()
+    assert closed == ["db"]
