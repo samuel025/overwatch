@@ -454,7 +454,11 @@ class Overwatch:
         self.update_blast_radius(incident)
         self._trace_investigation(incident, time.monotonic() - started)
         self._save(incident)
-        self.events.emit("incident.updated", incident=incident.to_dict())
+        self.events.emit("incident.updated", incident=incident.to_dict())  # the diagnosis is offered now...
+        if incident.status == "awaiting_approval":
+            self.investigator.critique(incident, timeline)  # ...and the second reader's findings follow, never holding it back
+            self._save(incident)
+            self.events.emit("incident.updated", incident=incident.to_dict())
         if self.cfg.approval == "auto" and incident.status == "awaiting_approval":
             self.approve(incident.id)
         return incident
@@ -694,7 +698,10 @@ class Overwatch:
 
     def _restore(self) -> None:
         for inc in self.store.load():
-            if inc.status == "investigating":  # the process stopped mid-investigation
+            if inc.status == "investigating" and inc.root_cause and not inc.root_cause.startswith("Investigation failed"):
+                inc.status = "awaiting_approval"  # it had concluded; only the last bookkeeping step was lost
+                self.store.save(inc)
+            elif inc.status == "investigating":  # the process stopped mid-investigation
                 inc.status = "failed"
                 inc.root_cause = "Investigation interrupted: Overwatch was restarted"
                 self.store.save(inc)

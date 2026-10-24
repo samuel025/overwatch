@@ -505,3 +505,52 @@ def test_a_critic_failure_never_fails_the_investigation(world):
     assert inc.status == "awaiting_approval" and inc.root_cause
     assert any("critic unavailable" in r for r in inc.reasoning)
     ow.stop()
+
+
+def test_a_stalled_critic_cannot_hold_back_the_approval(world):
+    """The incident is offered for approval as soon as the diagnosis exists; the critic only annotates it later."""
+    import threading as _t
+
+    make, set_value = world
+    ow = make()
+    ow.cfg.llm.triage_model = "fast-model"
+    release = _t.Event()
+
+    class Stalls:
+        def chat_json(self, messages, model, agent, **_):
+            if agent == "critic":
+                release.wait(10)  # the provider has stalled
+                return {"claims": []}
+            if agent == "triage":
+                return {"hypothesis": "guess", "confidence": 0.5}
+            return {"action": "conclude", "root_cause": "a is overloaded", "confidence": 0.8}
+
+    ow.investigator.llm = Stalls()
+    set_value("a", 50)
+    inc = ow.open_incident(ow.watcher.run())
+    worker = _t.Thread(target=ow.investigate, args=(inc,), daemon=True)
+    worker.start()
+    assert wait_for(lambda: inc.status == "awaiting_approval")  # approvable while the critic is still stuck
+    assert worker.is_alive() and "unsupported_claims" not in inc.grounding
+    release.set()
+    worker.join(5)
+    assert inc.grounding.get("unsupported_claims") == []
+    ow.stop()
+
+
+def test_a_restart_keeps_a_diagnosis_that_was_already_written(world):
+    from overwatch.models import Anomaly, Incident
+
+    make, _ = world
+    ow = make()
+    anomaly = Anomaly("a_high", "a", 50.0, 10, ">", "a is high")
+    done = Incident(anomalies=[anomaly], status="investigating")
+    done.root_cause = "The redis container was stopped on request."
+    half = Incident(anomalies=[anomaly], status="investigating")
+    ow.store.save(done)
+    ow.store.save(half)
+    ow.stop()
+    again = make()
+    assert again.incidents[done.id].status == "awaiting_approval"  # it had concluded; approve button comes back
+    assert again.incidents[half.id].status == "failed"  # it never concluded
+    again.stop()

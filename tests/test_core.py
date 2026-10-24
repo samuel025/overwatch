@@ -435,3 +435,47 @@ def test_query_steps_can_skip_long_reasoning_but_a_conclusion_never_does():
     assert calls[0] == quick  # picking the first query: no long reasoning
     assert calls[1] == quick and calls[2] is None  # a proposed conclusion is redone with full reasoning
     assert inc.root_cause == "v1.8.0 dropped an index"
+
+
+def test_optional_model_calls_get_one_bounded_attempt_and_timeouts_are_not_retried_repeatedly(monkeypatch):
+    import httpx
+    import openai
+
+    from overwatch.llm import LLM
+
+    request = httpx.Request("POST", "http://x")
+    calls, options = [], []
+
+    class Comp:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def create(self, **kw):
+            calls.append(1)
+            raise self.exc
+
+    class Client:
+        def __init__(self, exc):
+            self.chat = type("Chat", (), {"completions": Comp(exc)})()
+
+        def with_options(self, **kw):
+            options.append(kw)
+            return self
+
+    llm = LLM(make_config().llm, trace_dir="/tmp/ow-test-llm")
+    monkeypatch.setattr("overwatch.llm.time.sleep", lambda s: None)
+    limited = openai.RateLimitError("slow", response=httpx.Response(429, request=request), body=None)
+    llm.client = Client(limited)
+    try:
+        llm._create(patience=25, model="m", messages=[])
+    except openai.RateLimitError:
+        pass
+    assert len(calls) == 1 and options == [{"timeout": 25, "max_retries": 0}]  # one attempt, 25 s at most
+
+    calls.clear()
+    llm.client = Client(openai.APITimeoutError(request=request))
+    try:
+        llm._create(model="m", messages=[])
+    except openai.APITimeoutError:
+        pass
+    assert len(calls) == 2  # a stalled provider: one retry, not five waits of minutes

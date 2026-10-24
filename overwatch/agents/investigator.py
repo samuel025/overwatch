@@ -76,6 +76,9 @@ or, when the evidence is sufficient:
 Every claim in root_cause must be backed by an item in "evidence"; quotes are checked against the data."""
 
 
+CRITIC_SECONDS = 25   # optional extras never hold up the diagnosis: one attempt, this long
+TRIAGE_SECONDS = 30
+
 CRITIC_PROMPT = """You check a diagnosis against the data it was based on. You do not diagnose.
 Break the diagnosis into its statements of FACT (what happened, what state something was in, numbers, times, what
 caused what). Skip recommendations and hedged statements ("may", "likely"). For each statement, copy the exact text
@@ -169,7 +172,8 @@ class Investigator:
         ]
         started = time.perf_counter()
         try:
-            reply = self.llm.chat_json(messages, model, agent="triage", extra_body=self.cfg.llm.triage_extra_body)
+            reply = self.llm.chat_json(messages, model, agent="triage", extra_body=self.cfg.llm.triage_extra_body,
+                                       patience=TRIAGE_SECONDS)
         except LLMError as e:
             incident.reasoning.append(f"fast first guess unavailable: {e}")
             return {}
@@ -229,7 +233,6 @@ class Investigator:
             if action.get("action") == "conclude" and str(action.get("root_cause", "")).strip():
                 self._conclude(incident, action)
                 self._ground(incident, timeline)
-                self.critique(incident, timeline)
                 self.emit("investigator.concluded", incident=incident.id, root_cause=incident.root_cause,
                           confidence=incident.confidence, severity=incident.severity,
                           recommended_actions=incident.recommended_actions)
@@ -314,7 +317,8 @@ class Investigator:
         messages = [{"role": "system", "content": CRITIC_PROMPT},
                     {"role": "user", "content": f"Diagnosis:\n{incident.root_cause}\n\nData:\n" + "\n\n".join(data)}]
         try:
-            reply = self.llm.chat_json(messages, model, agent="critic", extra_body=self.cfg.llm.triage_extra_body)
+            reply = self.llm.chat_json(messages, model, agent="critic", extra_body=self.cfg.llm.triage_extra_body,
+                                       patience=CRITIC_SECONDS)
         except LLMError as e:
             incident.reasoning.append(f"critic unavailable: {e}")
             return []

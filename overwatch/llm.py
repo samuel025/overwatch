@@ -27,11 +27,12 @@ class LLM:
         if not cfg.base_url:
             raise LLMError("llm.base_url is empty: start Nightshift and set LLM_BASE_URL")
         self.cfg = cfg
-        # Nightshift identifies the calling app and request scope through these headers. 180s timeout per
-        # the Meterless Runtime contract: a cold model load can take minutes.
+        # Nightshift identifies the calling app and request scope through these headers. A call gets 150 s (a cold
+        # model load can take minutes, the slowest investigation step on record took 70 s); the SDK's own retries are
+        # off, because _create retries with a policy of its own and the two would multiply.
         headers = {"meterless-app": "overwatch", "meterless-scope": "user", **cfg.headers}
         self.client = OpenAI(
-            base_url=cfg.base_url, api_key=cfg.api_key or "none", default_headers=headers, timeout=180
+            base_url=cfg.base_url, api_key=cfg.api_key or "none", default_headers=headers, timeout=150, max_retries=0
         )
         self.trace_path = Path(trace_dir) / "llm_calls.jsonl"
         self.trace_path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,16 +50,22 @@ class LLM:
 
     RETRY_DELAYS = (4, 12, 30, 60)  # seconds; a rate limit or a blip should not fail a whole investigation
 
-    def _create(self, **kwargs: Any) -> Any:
-        """One model call, retried with backoff on a rate limit (429), a server error or a dropped connection."""
+    def _create(self, patience: float | None = None, **kwargs: Any) -> Any:
+        """One model call, retried with backoff on a rate limit (429), a server error or a dropped connection.
+        `patience` is for optional extras (the first guess, the critic): one attempt, that many seconds at most. A call
+        that times out is retried once, never repeatedly, so a stalled provider cannot hold an incident for minutes."""
         import openai
 
         retryable = (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError, openai.InternalServerError)
-        for attempt, delay in enumerate((*self.RETRY_DELAYS, None)):
+        client = self.client
+        if patience and hasattr(client, "with_options"):
+            client = client.with_options(timeout=patience, max_retries=0)
+        delays = () if patience else self.RETRY_DELAYS
+        for attempt, delay in enumerate((*delays, None)):
             try:
-                return self.client.chat.completions.create(**kwargs)
+                return client.chat.completions.create(**kwargs)
             except retryable as e:
-                if delay is None:
+                if delay is None or (isinstance(e, openai.APITimeoutError) and attempt >= 1):
                     raise
                 wait = delay
                 retry_after = getattr(getattr(e, "response", None), "headers", {}).get("retry-after")
@@ -66,10 +73,11 @@ class LLM:
                     wait = max(delay, min(int(retry_after), 90))
                 time.sleep(wait)
 
-    def chat(self, messages: list[dict[str, str]], model: str, agent: str, extra_body: dict | None = None) -> str:
+    def chat(self, messages: list[dict[str, str]], model: str, agent: str, extra_body: dict | None = None,
+             patience: float | None = None) -> str:
         start = time.monotonic()
         try:
-            resp = self._create(model=model, messages=messages, temperature=self.cfg.temperature,
+            resp = self._create(patience=patience, model=model, messages=messages, temperature=self.cfg.temperature,
                                 extra_body=extra_body or None)
         except Exception as e:
             hint = " (the provider is rate limiting; Overwatch retried and gave up)" if "429" in str(e) else ""
@@ -79,12 +87,13 @@ class LLM:
         return content
 
     def chat_json(
-        self, messages: list[dict[str, str]], model: str, agent: str, retries: int = 2, extra_body: dict | None = None
+        self, messages: list[dict[str, str]], model: str, agent: str, retries: int = 2, extra_body: dict | None = None,
+        patience: float | None = None,
     ) -> dict[str, Any]:
         """Ask for a JSON object; on unparseable output, tell the model and retry."""
         msgs = list(messages)
         for _ in range(retries + 1):
-            raw = self.chat(msgs, model, agent, extra_body=extra_body)
+            raw = self.chat(msgs, model, agent, extra_body=extra_body, patience=patience)
             parsed = extract_json(raw)
             if parsed is not None:
                 return parsed
