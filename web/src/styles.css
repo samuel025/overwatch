@@ -2,7 +2,7 @@
   color-scheme: dark;
   /* Design system (ui-ux-pro-max: "Minimalism & Swiss", dense dashboard): slate surfaces, one accent,
      status colours reserved for health. */
-  --bg: #0b1120;
+  --bg: #000000;
   --panel: #111827;
   --panel-2: #172033;
   --line: #2a3447;
