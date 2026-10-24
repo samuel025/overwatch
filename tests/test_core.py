@@ -412,3 +412,26 @@ def test_model_calls_are_retried_on_a_rate_limit_then_succeed(monkeypatch):
     monkeypatch.setattr("overwatch.llm.time.sleep", slept.append)
     assert llm.chat_json([{"role": "user", "content": "x"}], "m", "test") == {"ok": True}
     assert len(calls) == 3 and slept == [4, 12]  # two 429s, backed off, third call went through
+
+
+def test_query_steps_can_skip_long_reasoning_but_a_conclusion_never_does():
+    quick = {"chat_template_kwargs": {"enable_thinking": False}}
+    calls = []
+
+    class Recorder:
+        def chat_json(self, messages, model, agent, extra_body=None, **_):
+            calls.append(extra_body)
+            if len(calls) == 1:
+                return {"action": "query", "source": "db", "query": "select * from request_metrics", "purpose": "latency"}
+            # the quick call proposes a conclusion; the next call (full reasoning) makes the real one
+            return {"action": "conclude", "root_cause": "v1.8.0 dropped an index", "confidence": 0.8,
+                    "evidence": [{"step": 1, "quote": "1700", "shows": "slow"}]}
+
+    cfg = make_config()
+    cfg.llm.query_extra_body = quick
+    src = FakeSource({"request_metrics": [{"p95": 1700}]})
+    inc = Incident(anomalies=[Anomaly("lat", "orders", 1700, 250, ">", "p95")])
+    Investigator(cfg, Recorder(), {"db": src}).investigate(inc)
+    assert calls[0] == quick  # picking the first query: no long reasoning
+    assert calls[1] == quick and calls[2] is None  # a proposed conclusion is redone with full reasoning
+    assert inc.root_cause == "v1.8.0 dropped an index"

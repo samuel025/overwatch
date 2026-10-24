@@ -94,6 +94,8 @@ class LLMConfig:
     max_steps: int = 8
     triage_model: str = ""  # optional fast model for a first guess while the deep investigation runs
     triage_extra_body: dict[str, Any] = field(default_factory=dict)  # provider options, e.g. turn off reasoning
+    query_extra_body: dict[str, Any] = field(default_factory=dict)  # provider options for steps that only choose the next
+    # query, e.g. {"chat_template_kwargs": {"enable_thinking": false}}: faster. A conclusion is always made without them.
     critic: bool = True  # after a conclusion, the fast model lists claims the data does not show (needs triage_model)
     headers: dict[str, str] = field(default_factory=dict)
 
@@ -202,6 +204,7 @@ def load_config(path: str | Path) -> Config:
             max_steps=int(llm.get("max_steps", 8)),
             triage_model=llm.get("triage_model", ""),
             triage_extra_body=llm.get("triage_extra_body") or {},
+            query_extra_body=llm.get("query_extra_body") or {},
             critic=bool(llm.get("critic", True)),
             headers={str(k): str(v) for k, v in (llm.get("headers") or {}).items()},
         ),

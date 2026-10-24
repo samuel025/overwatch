@@ -115,6 +115,8 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("faults", nargs="*", default=list(FAULTS))
     p.add_argument("--modes", nargs="+", default=["hmem", "none"], choices=["hmem", "none"])
+    p.add_argument("--variants", nargs="+", default=["full"], choices=["full", "fast"],
+                   help="fast = the model skips long reasoning on steps that only pick a query (conclusions never do)")
     p.add_argument("--out", default=str(ROOT / "eval" / "results.md"))
     p.add_argument("--config", default=str(DEMO / "overwatch.yaml"),
                    help="e.g. examples/demo-system/overwatch.zetaris.yaml to run every query through Zetaris")
@@ -134,10 +136,14 @@ def main() -> None:
             continue
         fault.apply()
         time.sleep(fault.settle_seconds)
-        for mode in args.modes:
-            r = run_once(cfg, fault, mode, trace_dir / name)
+        for mode, variant in [(m, v) for m in args.modes for v in args.variants]:
+            cfg.llm.query_extra_body = {"chat_template_kwargs": {"enable_thinking": False}} if variant == "fast" else {}
+            r = run_once(cfg, fault, mode, trace_dir / name / variant)
+            if len(args.variants) > 1:
+                r["mode"] = f"{mode}+{variant}"
             results.append(r)
-            print(f"   {mode:<5} correct={r['correct']} {r['seconds']}s {r['queries']} queries: {r['root_cause'][:100]}", flush=True)
+            mode = r["mode"]
+            print(f"   {mode:<10} correct={r['correct']} {r['seconds']}s {r['queries']} queries: {r['root_cause'][:100]}", flush=True)
             with (trace_dir / "results.jsonl").open("a") as f:
                 f.write(json.dumps(r) + "\n")
         write_report(results, Path(args.out), cfg.llm.investigator_model)

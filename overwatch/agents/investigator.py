@@ -205,7 +205,11 @@ class Investigator:
             final = step == budget + 1
             self.emit("agent.thinking", agent="investigator", incident=incident.id, step=step)
             try:
-                action = self.llm.chat_json(messages, cfg.llm.investigator_model, agent="investigator")
+                quick = cfg.llm.query_extra_body if not final else None  # no long reasoning just to pick a query
+                action = (self.llm.chat_json(messages, cfg.llm.investigator_model, agent="investigator", extra_body=quick)
+                          if quick else self.llm.chat_json(messages, cfg.llm.investigator_model, agent="investigator"))
+                if quick and action.get("action") == "conclude":  # a conclusion always gets the full reasoning
+                    action = self.llm.chat_json(messages, cfg.llm.investigator_model, agent="investigator")
             except LLMError as e:
                 incident.reasoning.append(f"model error: {e}")
                 incident.root_cause = f"Investigation failed: {e}"
