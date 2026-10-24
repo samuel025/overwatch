@@ -362,3 +362,33 @@ def test_stopping_overwatch_closes_its_data_sources(world):
     ow.sources["db"].close = lambda: closed.append("db")  # a Zetaris source holds a Java connection that blocks exit
     ow.stop()
     assert closed == ["db"]
+
+
+def test_a_problem_that_starts_after_the_diagnosis_gets_a_fresh_investigation(world):
+    make, set_value = world
+    ow = make()
+    calls = []
+    real = ow.investigator.llm.chat_json
+    ow.investigator.llm.chat_json = lambda *a, **k: calls.append(1) or real(*a, **k)
+    set_value("a", 50)
+    first = ow.check_once()
+    assert wait_for(lambda: first.status == "awaiting_approval")
+    before = len(calls)
+    set_value("b", 50)
+    assert ow.check_once() is first  # same incident, but its evidence predates b
+    assert wait_for(lambda: len(calls) > before and first.status == "awaiting_approval")
+    assert any("investigating again" in line for line in first.reasoning)
+    ow.stop()
+
+
+def test_investigating_again_is_limited_and_never_touches_an_incident_someone_acted_on(world):
+    make, set_value = world
+    ow = make()
+    set_value("a", 50)
+    first = ow.check_once()
+    assert wait_for(lambda: first.status == "awaiting_approval")
+    first.status = "dismissed"
+    set_value("b", 50)
+    ow.check_once()
+    assert first.status == "dismissed" and ow._refreshes.get(first.id, 0) == 0
+    ow.stop()

@@ -61,6 +61,7 @@ class Overwatch:
         self._stop = threading.Event()
         self.failing: set[str] = set()  # checks firing on the latest pass
         self.healthy_since: dict[str, float] = {}  # incident id -> when all its checks first looked healthy
+        self._refreshes: dict[str, int] = {}  # incident id -> how often it was investigated again
         self.pool = ThreadPoolExecutor(cfg.max_parallel_investigations, thread_name_prefix="investigation")
         # instance -> {service, since, detail} for containers a pushed event says are down
         self.down: dict[str, dict[str, Any]] = {}
@@ -253,6 +254,7 @@ class Overwatch:
             target = self._merge_target()
             if target:
                 self._merge(target, fresh)
+                self._reinvestigate(target)
                 return target
             incident = self.open_incident(fresh)
         try:
@@ -575,6 +577,28 @@ class Overwatch:
         with self.lock:
             recent = [i for i in self._active() if time.time() - _ts(i.opened_at) < self.cfg.merge_window_seconds]
         return max(recent, key=lambda i: i.opened_at) if recent else None
+
+    MAX_REFRESHES = 2
+
+    def _reinvestigate(self, incident: Incident) -> None:
+        """New checks fired after a diagnosis was made but before anyone acted on it: the diagnosis (and the evidence
+        behind it) predates them, so investigate again with fresh evidence. Limited, so flapping cannot loop."""
+        with self.lock:
+            if incident.status != "awaiting_approval" or self._refreshes.get(incident.id, 0) >= self.MAX_REFRESHES:
+                return
+            self._refreshes[incident.id] = self._refreshes.get(incident.id, 0) + 1
+            incident.reasoning.append(
+                "New checks fired after this diagnosis, so Overwatch is investigating again with fresh evidence. "
+                f"The earlier conclusion was: {incident.root_cause[:300]}")
+            incident.status, incident.root_cause, incident.confidence = "investigating", "", 0.0
+            incident.recommended_actions, incident.evidence, incident.hypotheses = [], [], []
+            incident.cited, incident.first_guess_verdict, incident.grounding, incident.hypothesis = [], {}, {}, {}
+        self._save(incident)
+        self.events.emit("incident.updated", incident=incident.to_dict())
+        try:
+            self.pool.submit(self._investigate_safely, incident)
+        except RuntimeError:  # shutting down
+            pass
 
     def _merge(self, incident: Incident, anomalies: list[Anomaly]) -> None:
         with self.lock:

@@ -148,7 +148,9 @@ def cmd_run(ow: Overwatch | None, host: str, port: int, insecure: bool, config_p
         print(f"Overwatch watching '{ow.cfg.system_name}' every {ow.cfg.interval_seconds}s. Console: {url}")
     else:
         print(f"No {config_path} yet. Open {url} to connect your system (or run `overwatch connect`).")
-    uvicorn.run(create_app(ow, config_path=config_path), host=host, port=port, log_level="warning")
+    # Bounded shutdown: open browser connections get 5 s to finish, and the process exits 8 s after shutdown starts.
+    uvicorn.run(create_app(ow, config_path=config_path, exit_after=8), host=host, port=port, log_level="warning",
+                timeout_graceful_shutdown=5)
     return 0
 
 

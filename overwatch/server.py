@@ -125,13 +125,19 @@ class Runtime:
 
 
 def create_app(ow: Overwatch | None, watch: bool = True, token: str | None = None,
-               config_path: str | Path | None = None) -> FastAPI:
+               config_path: str | Path | None = None, exit_after: float | None = None) -> FastAPI:
+    """exit_after: when run as a program, force the process to exit this many seconds after shutdown begins, so a
+    stuck worker thread or connection can never leave a stopped Overwatch running."""
     rt = Runtime(ow, watch, config_path)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         rt.launch()
         yield
+        if exit_after:
+            watchdog = threading.Timer(exit_after, lambda: os._exit(0))
+            watchdog.daemon = True
+            watchdog.start()
         if rt.ow:
             rt.ow.stop()
 
