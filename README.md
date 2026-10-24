@@ -52,7 +52,7 @@ Most of that work is mechanical: form a hypothesis, run a query, look at the res
 5. **Waits for you.** Nothing is sent until a human clicks *Approve*. Then it posts to Slack, opens a Jira ticket, and teaches its memory.
 6. **Notices recovery** on its own once everything is healthy again.
 
-All of it is visible live in a web console with a **map of your system** that turns red or grey where things are failing or not responding.
+All of it is visible live in a web console with an interactive **map of your system**: drag the services wherever you like (positions are remembered), pan, and zoom with Ctrl+scroll. It turns red or grey where things are failing or not responding, and marks the services that call a failing one as **at risk** the moment an incident opens, before any diagnosis exists.
 
 **Real example** (from this project's own testing, model `nvidia/nemotron-3-ultra-550b-a55b`): after a release silently dropped a database index, Overwatch ran 7 queries (error trend, downstream services, container health, recent deploys, the table's indexes, scan statistics, the slow query) and concluded, at 98% confidence:
 
@@ -505,7 +505,7 @@ topology:
   payments: [postgres, psp.example.com]   # names containing a dot are shown as external
 ```
 
-Used for the system map and the blast radius. Service names should match the `service` field of your checks so the map can colour each box.
+Used for the system map and the blast radius. Service names should match the `service` field of your checks so the map can colour each box. Discovery does this for you when Prometheus names a service differently from Docker (`url_shortener_api` versus `api`): the metrics are attached to the Docker service and a note says so.
 
 ### `checks`: what the Watcher evaluates
 

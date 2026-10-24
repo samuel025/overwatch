@@ -156,3 +156,35 @@ def test_accepted_externals_become_topology_knowledge_and_checks():
     plan["log_source"] = {"type": "docker", "source": "docker"}
     doc = yaml.safe_load(render(plan)[0])
     assert next(c for c in doc["checks"] if c["name"] == "api_stripe_com_errors")["query"] == "count payments 2 api.stripe.com"
+
+
+def test_a_monitoring_name_maps_to_the_service_it_scrapes_only_when_unambiguous():
+    from overwatch.discovery import match_service
+
+    known = {"api", "postgres", "redis", "payments"}
+    assert match_service("url_shortener_api", known) == "api"          # last word is exactly a service
+    assert match_service("shop-payments", known) == "payments"
+    assert match_service("api", known) is None                          # already a service: nothing to map
+    assert match_service("capital", known) is None                      # "api" inside a word is not a match
+    assert match_service("payments_gateway", known) is None             # the service is not the last word
+    assert match_service("web_api", {"api", "internal_api"}) == "api"
+    assert match_service("billing_api", {"api", "admin_api"}) == "api"  # admin_api does not end the name
+    assert match_service("x_api", {"api", "x_api_v2"}) == "api"
+    assert match_service("shop_db_api", {"api", "db_api"}) is None      # two services fit: do not guess
+
+
+def test_prometheus_metrics_are_attached_to_the_compose_service(monkeypatch):
+    from overwatch import discovery
+
+    monkeypatch.setattr(discovery, "discover_docker", lambda *a, **k: {
+        "project": "shop", "projects": ["shop"], "service_label": "x", "services": {"api": {}, "postgres": {}},
+        "topology": {}, "checks": [], "runtime_facts": "", "notes": [], "env_hits": {}, "log_hits": {}, "internal": []})
+    monkeypatch.setattr(discovery, "discover_prometheus", lambda url: {
+        "services": ["shop_api"], "catalog": "prom", "notes": [],
+        "checks": [{"name": "shop_api_p95_latency_ms", "service": "shop_api", "source": "prom", "query": 'x{job="shop_api"}'},
+                   {"name": "shop_api_up", "kind": "heartbeat", "service": "shop_api", "source": "prom", "query": 'up{job="shop_api"}'}]})
+    plan = discovery.discover({"project": "shop"}, "http://prom:9090")
+    assert {c["service"] for c in plan["checks"] if c["name"].startswith("shop_api")} == {"api"}
+    assert "shop_api" not in plan["services"]  # not a second service on the map
+    assert any("Prometheus calls 'shop_api' what Docker calls 'api'" in n for n in plan["notes"])
+    assert 'job="shop_api"' in next(c["query"] for c in plan["checks"] if c["name"] == "shop_api_up")  # PromQL untouched

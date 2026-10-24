@@ -29,6 +29,15 @@ def _env_name(source: str) -> str:
     return "OW_" + re.sub(r"[^A-Z0-9]", "_", source.upper()) + "_URL"
 
 
+def match_service(name: str, known: set[str]) -> str | None:
+    """Prometheus calls the API "url_shortener_api" and Docker Compose calls it "api". Map a monitoring name to the
+    service it scrapes when its last words are exactly that service's name and no other service fits; otherwise None."""
+    words = lambda text: [w for w in re.split(r"[^a-z0-9]+", text.lower()) if w]  # noqa: E731
+    mine = words(name)
+    hits = [k for k in known if words(k) and len(mine) > len(words(k)) and mine[-len(words(k)):] == words(k)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
              databases: dict[str, str] | None = None, zetaris: bool = False,
              kubernetes: dict[str, Any] | None = None, loki: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -112,10 +121,18 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
             p = discover_prometheus(prometheus_url)
             plan["sources"]["prom"] = {"type": "prometheus", "url": prometheus_url}
             plan["catalog"].append(p["catalog"])
+            # a monitoring name that is a known service under another name: attach its checks to that service, so the
+            # map and the blast radius see one service (the PromQL keeps the monitoring name)
+            known = set(plan["services"])
+            names = set(p["services"]) | {c["service"] for c in p["checks"]}
+            alias = {n: m for n in names if n not in known and (m := match_service(n, known))}
+            for c in p["checks"]:
+                c["service"] = alias.get(c["service"], c["service"])
             plan["checks"] += p["checks"]
-            plan["notes"] += p["notes"]
+            plan["notes"] += p["notes"] + [f"Prometheus calls '{n}' what Docker calls '{m}': its metrics are attached to '{m}'."
+                                           for n, m in sorted(alias.items())]
             for svc in p["services"]:
-                plan["services"].setdefault(svc, {"what": "TODO: describe what this service does"})
+                plan["services"].setdefault(alias.get(svc, svc), {"what": "TODO: describe what this service does"})
         except Exception as e:
             plan["errors"].append(f"Prometheus at {prometheus_url}: {e}")
 
