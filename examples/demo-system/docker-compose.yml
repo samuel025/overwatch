@@ -75,6 +75,8 @@ services:
     <<: *service
     cpus: 0.25
     command: ["python", "collector.py"]
+    environment:
+      COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-demo-system}  # the shop's own containers, whatever the project is called
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro  # read container stats, like cAdvisor
 

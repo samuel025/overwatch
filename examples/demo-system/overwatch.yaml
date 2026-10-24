@@ -158,7 +158,7 @@ events:
     service_label: shop.service
     instance_label: shop.instance
     filters:
-      label: ["com.docker.compose.project=demo-system"]
+      label: ["com.docker.compose.project=${COMPOSE_PROJECT_NAME:-demo-system}"]
 
 checks:
   - name: gateway_probe
