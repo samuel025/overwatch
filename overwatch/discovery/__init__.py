@@ -65,6 +65,18 @@ def _connections_check(name: str, source: str, service: str) -> dict[str, Any]:
     }
 
 
+def _slow_query_check(name: str, source: str, service: str) -> dict[str, Any]:
+    """The longest query running right now. (pg_stat_statements is cumulative, so a check on it would stay red long
+    after the query was fixed; what is running now clears the moment the query does.)"""
+    return {
+        "name": f"{name}_longest_query_seconds", "source": source, "service": service, "threshold": 5,
+        "comparison": ">", "severity": "medium",
+        "query": "SELECT coalesce(max(extract(epoch FROM clock_timestamp() - query_start)), 0) AS value FROM pg_stat_activity "
+                 "WHERE state = 'active' AND pid <> pg_backend_pid() AND backend_type = 'client backend'",
+        "description": f"seconds the longest query on {name} has been running (a slow or stuck query)",
+    }
+
+
 def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
              databases: dict[str, str] | None = None, zetaris: bool = False,
              kubernetes: dict[str, Any] | None = None, loki: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -173,8 +185,10 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
                     direct = discover_sql(name, url, target="direct")  # the live-session evidence only exists there
                     s["evidence"] = s["evidence"] + [{**e, "source": f"{name}_live"} for e in direct["evidence"]
                                                      if "pg_stat_activity" in e.get("query", "")]
-                    plan["checks"].append(_connections_check(
-                        name, f"{name}_live", _database_service(url, plan["services"]) or name))
+                    svc = _database_service(url, plan["services"]) or name
+                    plan["checks"].append(_connections_check(name, f"{name}_live", svc))
+                    if s.get("pg_activity"):
+                        plan["checks"].append(_slow_query_check(name, f"{name}_live", svc))
                     s["catalog"] += (f"\n  Live Postgres internals are NOT in Zetaris. Query source {name}_live (PostgreSQL SQL) for: "
                                      "pg_stat_activity (who is connected, what they run and wait on), pg_locks, pg_indexes, "
                                      "pg_stat_user_tables (seq_scan vs idx_scan), pg_stat_statements (if enabled).")
@@ -182,7 +196,10 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
                 plan["sources"][name] = {"type": "postgres" if s["dialect"] == "postgresql" else "sql",
                                          "url": sqlalchemy_url(url)}
                 if s["dialect"] == "postgresql":
-                    plan["checks"].append(_connections_check(name, name, _database_service(url, plan["services"]) or name))
+                    svc = _database_service(url, plan["services"]) or name
+                    plan["checks"].append(_connections_check(name, name, svc))
+                    if s.get("pg_activity"):
+                        plan["checks"].append(_slow_query_check(name, name, svc))
             plan["catalog"].append(s["catalog"])
             plan["checks"] += s["checks"]
             plan["evidence"] += s["evidence"]

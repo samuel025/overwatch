@@ -195,6 +195,7 @@ def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direc
         "name": name, "dialect": dialect, "tables": [t["name"] for t in tables], "catalog": "\n".join(lines),
         "roles": {k: v.get("table") for k, v in roles.items()}, "checks": checks, "evidence": evidence, "notes": notes,
         "services": roles.get("metrics", {}).get("services", []),
+        "pg_activity": bool(pg and pg_health.get("pg_stat_activity")),
         "logs": {**roles["logs"], "table": qual(roles["logs"]["table"])} if roles.get("logs") else None,
         "log_hits": log_hits,
     }

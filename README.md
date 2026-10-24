@@ -316,6 +316,7 @@ Overwatch does not plug into your services. It reads the data they already produ
 | A slow service or endpoint | p95 latency above its limit or above its own baseline |
 | A silent service | a heartbeat that stops arriving |
 | A database connection pool nearly full | Postgres connections in use above 85% of `max_connections` (`<db>_connections_used_pct`), before the app is refused |
+| **A slow or stuck database query** | Postgres: the longest query running right now, over 5 s (`<db>_longest_query_seconds`). It clears the moment the query ends. Not `pg_stat_statements`, which is cumulative and would stay red after the fix |
 | A database down or unreachable | its container check fails and its callers' errors rise |
 | Memory leak, restart loop, out-of-memory kills | repeated container stops and restarts |
 | Traffic surge | request rate far above baseline |
@@ -327,7 +328,7 @@ Overwatch does not plug into your services. It reads the data they already produ
 | Cause | Where the evidence comes from |
 |---|---|
 | A bad release or a config change just before it began | deploy and change history, lined up against the start time |
-| A dropped index or a slow query | `pg_indexes`, `pg_stat_statements`, scan statistics |
+| A dropped index, or why a query is slow | `pg_indexes`, `pg_stat_statements`, scan statistics |
 | A lock held by an idle session | `pg_stat_activity`, `pg_locks` |
 | A batch job or heavy query hogging the database | `pg_stat_activity` |
 | A wrong timeout or pool size | config changes and error messages |

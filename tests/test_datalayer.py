@@ -213,7 +213,7 @@ def test_postgres_gets_a_connection_saturation_check_on_its_own_service(monkeypa
     def fake_sql(name, url, max_tables=40, target="direct"):
         return {"name": name, "dialect": "postgresql", "tables": [], "catalog": "", "checks": [], "notes": [],
                 "evidence": [{"name": "a", "label": "l", "source": name, "query": "SELECT 1 FROM pg_stat_activity"}],
-                "services": [], "logs": None, "log_hits": {}}
+                "services": [], "logs": None, "log_hits": {}, "pg_activity": True}
 
     monkeypatch.setattr(discovery, "discover_sql", fake_sql)
     monkeypatch.setattr(discovery, "discover_docker", lambda *a, **k: {
@@ -226,3 +226,5 @@ def test_postgres_gets_a_connection_saturation_check_on_its_own_service(monkeypa
         assert check["service"] == "postgres" and check["threshold"] == 85
         assert check["source"] == ("main_live" if zet else "main")
         assert "max_connections" in check["query"]
+        slow = next(c for c in plan["checks"] if c["name"] == "main_longest_query_seconds")
+        assert slow["service"] == "postgres" and slow["source"] == check["source"] and "pg_stat_activity" in slow["query"]
