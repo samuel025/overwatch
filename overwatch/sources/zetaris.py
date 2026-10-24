@@ -86,7 +86,8 @@ class ZetarisSource(DataSource):
         try:
             import jaydebeapi  # optional dependency; also needs a JRE and the Zetaris driver JAR
         except ImportError as e:
-            raise SourceError("Zetaris access needs 'jaydebeapi' (pip install overwatch[zetaris]) and Java") from e
+            raise SourceError("Zetaris access needs 'jaydebeapi' and a Java runtime. From the repository: "
+                              "pip install -e \".[zetaris]\"") from e
         try:
             self._conn = jaydebeapi.connect(
                 self.cfg["driver_class"], self.cfg["jdbc_url"],

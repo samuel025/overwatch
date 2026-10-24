@@ -14,7 +14,7 @@ Built for **HackOS 2026**, Track 02: *The Agent That Can Explain Why*.
 2. [What it does, in one minute](#2-what-it-does-in-one-minute)
 3. [How it works](#3-how-it-works)
 4. [Sponsor technology](#4-sponsor-technology)
-5. [Quick start: the demo in 10 minutes](#5-quick-start-the-demo-in-10-minutes)
+5. [Quick start: the demo](#5-quick-start-the-demo)
 6. [Using Overwatch on your own system](#6-using-overwatch-on-your-own-system)
 7. [Configuration reference](#7-configuration-reference)
 8. [The console](#8-the-console)
@@ -139,15 +139,19 @@ flowchart LR
 
 ---
 
-## 5. Quick start: the demo in 10 minutes
+## 5. Quick start: the demo
+
+About 15 minutes of work once Zetaris is installed. Installing Zetaris is the long part (a 4 GB download and a 5 to 10 minute first start), so start it first.
 
 ### Prerequisites
 
 | Tool | Version | Used for |
 |---|---|---|
-| Python | 3.11+ | Overwatch itself |
-| Node.js | 20+ | The H-MEM memory service and (only if you change it) the console |
-| Docker + Docker Compose | recent | The demo shop |
+| Python | 3.11+ (the command is `python3` on most Linux and macOS systems) | Overwatch itself |
+| Java runtime | 11 or newer (tested with 25) | Overwatch's JDBC connection to Zetaris |
+| Node.js | 20+ | The H-MEM memory service |
+| Docker + Docker Compose | recent | Zetaris, Overwatch's own database, the demo shop |
+| Zetaris | 2.4.x | The data layer. Download it from the Zetaris Cloud "Run locally" page (it needs the registry login from the hackathon); it runs as four containers |
 | An AI provider | — | Meterless Nightshift, or a free NVIDIA API key from https://build.nvidia.com for development |
 
 ### 1. Install
@@ -155,10 +159,10 @@ flowchart LR
 ```bash
 git clone <this repository> overwatch && cd overwatch
 
-# Python package and CLI
-python -m venv .venv
+# Python package and CLI (the zetaris extra is the Java bridge to Zetaris)
+python3 -m venv .venv
 . .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,zetaris]"
 
 # H-MEM memory service
 (cd memory-service && npm install)
@@ -172,28 +176,50 @@ The console is already built into `overwatch/ui/dist`; you only need `web/` if y
 cp .env.example .env
 ```
 
-Edit `.env` (it is git-ignored). For development without Nightshift, use NVIDIA directly:
+Edit `.env` (it is git-ignored). Set your AI provider; for development without Nightshift, use NVIDIA directly:
 
 ```dotenv
 LLM_BASE_URL=https://integrate.api.nvidia.com/v1
 LLM_API_KEY=nvapi-...                                  # from build.nvidia.com
 OVERWATCH_MODEL=nvidia/nemotron-3-ultra-550b-a55b
-MEMORY_URL=http://127.0.0.1:8099
 OVERWATCH_TOKEN=pick-a-console-password                # optional, locks the console
 ```
 
+`.env.example` already holds the usual Zetaris address (`ZETARIS_JDBC_URL`) and Overwatch's database address. You fill in the rest of the Zetaris block:
+
+```dotenv
+ZETARIS_DRIVER_JAR=/path/to/zetaris-platform/jdbc/ndp-jdbc-driver-<version>-driver.jar   # ships in the Zetaris download
+ZETARIS_USER=admin@zetaris.com                          # the account you sign in to Zetaris with
+ZETARIS_PASSWORD=...                                    # its password (Zetaris's own README gives the default)
+ZETARIS_HOST_ALIAS=172.17.0.1                           # Linux. On macOS/Windows use host.docker.internal
+```
+
+`ZETARIS_HOST_ALIAS` is what the word "localhost" means to Zetaris, which runs in Docker: it needs it to reach the demo databases on your machine.
+
 Not every Nemotron model is enabled on every NVIDIA account. If you get `404 ... Not found for account`, try another one from `curl https://integrate.api.nvidia.com/v1/models`.
 
-### 3. Start the demo shop
+### 3. Start Zetaris and Overwatch's own database
+
+```bash
+# Zetaris: unzip the download, run the `docker login` command from the download page, then
+cd zetaris-platform
+docker compose up -d && ./verify.sh          # first start takes 5-10 minutes; verify.sh says when it is ready
+cd -
+
+# Overwatch's own Postgres: its history, and the container telemetry Zetaris queries
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+### 4. Start the demo shop
 
 ```bash
 cd examples/demo-system
-docker compose up -d --build        # first build takes a few minutes; Postgres seeds 3M orders
+docker compose up -d --build        # about a minute: Postgres loads 3M orders on its first start
 ```
 
 This starts a gateway, an orders service, two payments replicas, Postgres (on port **55432**), a container-metrics collector, a "chaos" service (the outside world) and a load generator sending ~15 checkouts per second.
 
-### 4. Start the memory service and seed past incidents
+### 5. Start the memory service and seed past incidents
 
 In a second terminal:
 
@@ -205,38 +231,33 @@ Back in the first:
 
 ```bash
 cd examples/demo-system
-../../.venv/bin/python scripts/seed_memory.py         # loads 5 past incident tickets into H-MEM
+../../.venv/bin/python scripts/seed_memory.py         # loads 5 past incident tickets into H-MEM; waits for the demo database
 ```
 
-### 5. Check everything is connected
+### 6. Connect Overwatch to Zetaris and check
 
 ```bash
-../../.venv/bin/overwatch -c overwatch.yaml doctor
+cd examples/demo-system
+../../.venv/bin/python scripts/register_zetaris.py     # registers the demo databases opsdb and shopdb in Zetaris (safe to repeat)
+../../.venv/bin/python scripts/make_zetaris_config.py  # writes overwatch.zetaris.yaml from overwatch.yaml
+../../.venv/bin/overwatch -c overwatch.zetaris.yaml doctor
 ```
 
-Every line should say `[ok]`: both data sources, the AI provider, memory, all 10 checks and the impact queries.
+Every line should say `[ok]`: Zetaris and the live database source, the AI provider, memory, every check and the impact queries. Every check, impact query and investigation query then goes through Zetaris (`opsdb.request_metrics`, `shopdb.orders`, ...), so one query can join across both databases. Live Postgres internals (`pg_stat_activity`, locks, indexes) are not tables Zetaris can register, so they stay on a direct `shopdb_live` source.
 
-### 6. Start Overwatch and open the console
+No Zetaris yet? `overwatch.yaml` is the same demo in a plain development mode with two direct database sources: use `-c overwatch.yaml` in this step and the next, and skip step 3's Zetaris part. The console then shows the individual sources instead of Zetaris. It exists for development, not as the product.
 
-```bash
-../../.venv/bin/overwatch -c overwatch.yaml run
-```
-
-**Through Zetaris instead** (needs Zetaris running and the `ZETARIS_*` variables from `.env.example` set; also `pip install jaydebeapi` and a Java runtime):
+### 7. Start Overwatch and open the console
 
 ```bash
-python scripts/register_zetaris.py                      # registers opsdb and shopdb in Zetaris (safe to repeat)
-python scripts/make_zetaris_config.py                   # writes overwatch.zetaris.yaml from overwatch.yaml
 ../../.venv/bin/overwatch -c overwatch.zetaris.yaml run
 ```
 
-Every check, impact query and investigation query then goes through Zetaris (`opsdb.request_metrics`, `shopdb.orders`, ...), so one query can join across both databases. Live Postgres internals (`pg_stat_activity`, locks, indexes) are not tables Zetaris can register, so they stay on a direct `shopdb_live` source. If Zetaris runs in Docker on Linux, set `ZETARIS_HOST_ALIAS=172.17.0.1` so it can reach your databases.
-
 Open **http://127.0.0.1:8080**. If you set `OVERWATCH_TOKEN`, open `http://127.0.0.1:8080/?token=<your token>` once; the browser remembers it.
 
-You should see *"All systems normal"* and a map of five green services.
+You should see *"All systems normal"* and a map of five green services. Give it two or three minutes of calm before you break something: while the stack is still warming up, startup noise can open an incident of its own.
 
-### 7. Break something and watch
+### 8. Break something and watch
 
 In another terminal:
 
@@ -355,7 +376,7 @@ So one SQL query can join "payments per minute before and after each deploy" (hi
 Details:
 
 - Zetaris is the intended data layer: set `ZETARIS_JDBC_URL` (and the other `ZETARIS_*` variables, see `.env.example`) and everything above applies. Without them Overwatch still starts, in a `direct` development mode (each database its own source, Docker commands answered live), and the console's *Data* chip shows the individual sources instead of Zetaris. That fallback exists for development and tests; it is not the product.
-- Zetaris is reached over JDBC with its own driver (Java and `pip install overwatch[zetaris]`). Only Overwatch's setup and startup flow runs DDL; agents can only run `SELECT`, `WITH`, `SHOW`, `DESCRIBE` and the `promql`/`logql` commands, whose expressions are percent-encoded so nothing an agent sends can change a statement.
+- Zetaris is reached over JDBC with its own driver (a Java runtime and the `zetaris` extra: `pip install -e ".[zetaris]"`). Only Overwatch's setup and startup flow runs DDL; agents can only run `SELECT`, `WITH`, `SHOW`, `DESCRIBE` and the `promql`/`logql` commands, whose expressions are percent-encoded so nothing an agent sends can change a statement.
 - Databases are re-registered at every start (`register:` in the config), so a restarted Zetaris heals itself.
 - If Zetaris runs in Docker on Linux, set `ZETARIS_HOST_ALIAS=172.17.0.1` so it can reach `localhost` services (databases, Prometheus).
 - Not yet through Zetaris: Kubernetes (it needs a bearer-token REST source; written against the docs but untested without a cluster). Raw log tailing for Kubernetes and Loki stays on live sources.
