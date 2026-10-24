@@ -224,6 +224,7 @@ def test_fast_first_guess_is_kept_and_passed_on(world):
     make, set_value = world
     ow = make()
     ow.cfg.llm.triage_model = "fast-model"
+    ow.cfg.llm.critic = False  # this test is about the first guess; the critic has its own tests
 
     class Both:
         def __init__(self):
@@ -449,4 +450,58 @@ def test_the_timeline_the_investigator_reads_lists_the_recent_change_as_a_suspec
     text = "\n".join(lines)
     assert "Suspect events" in text and "S1" in text and "v2.0.0" in text and "rewrote the lookup" in text
     assert "config-9" not in text  # outside the hour before the problem
+    ow.stop()
+
+
+def _critic_world(world, reply):
+    make, set_value = world
+    ow = make()
+    ow.cfg.llm.triage_model = "fast-model"
+
+    class Scripted:
+        def __init__(self):
+            self.agents = []
+
+        def chat_json(self, messages, model, agent, **_):
+            self.agents.append(agent)
+            if agent == "critic":
+                if isinstance(reply, Exception):
+                    raise reply
+                assert "Diagnosis:" in messages[1]["content"] and "Data:" in messages[1]["content"]
+                return reply
+            if agent == "triage":
+                return {"hypothesis": "guess", "confidence": 0.5}
+            return {"action": "conclude", "root_cause": "The container failed its health check and was stopped.",
+                    "confidence": 0.9}
+
+    ow.investigator.llm = Scripted()
+    set_value("a", 50)
+    return ow, ow.handle(ow.watcher.run())
+
+
+def test_the_critic_flags_claims_whose_quoted_support_is_not_in_the_data(world):
+    reply = {"claims": [
+        {"claim": "The container failed its health check", "support": "health_status: unhealthy at 06:19"},  # not in the data
+        {"claim": "a_high is failing", "support": "a_high on a"},                                        # in the anomalies
+        {"claim": "A cold cache slowed the scans", "support": ""}]}                                      # no support at all
+    ow, inc = _critic_world(world, reply)
+    assert inc.grounding["unsupported_claims"] == ["The container failed its health check", "A cold cache slowed the scans"]
+    assert inc.confidence == 0.6 and any("second reader" in r for r in inc.reasoning)
+    assert "critic" in ow.investigator.llm.agents
+    ow.stop()
+
+
+def test_a_diagnosis_whose_claims_all_quote_the_data_is_left_alone(world):
+    ow, inc = _critic_world(world, {"claims": [{"claim": "a_high is failing", "support": "a_high on a"}]})
+    assert inc.grounding["unsupported_claims"] == []
+    assert not any("second reader" in r for r in inc.reasoning)  # nothing flagged, nothing added
+    ow.stop()
+
+
+def test_a_critic_failure_never_fails_the_investigation(world):
+    from overwatch.llm import LLMError
+
+    ow, inc = _critic_world(world, LLMError("model down"))
+    assert inc.status == "awaiting_approval" and inc.root_cause
+    assert any("critic unavailable" in r for r in inc.reasoning)
     ow.stop()

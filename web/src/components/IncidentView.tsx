@@ -174,11 +174,19 @@ function Grounding({ incident }: { incident: Incident }) {
   const g = incident.grounding;
   if (!g || g.total === undefined) return null;
   const terms = g.unsupported_terms ?? [];
+  const claims = g.unsupported_claims ?? [];
+  const limited = !g.ok || claims.length > 0;
   return (
-    <div className={clsx("grounding", g.ok ? "grounding-ok" : "grounding-warn")}>
-      {g.ok ? "✓" : "⚠"} Evidence check: {g.verified}/{g.total} quotes found in the data
+    <div className={clsx("grounding", limited ? "grounding-warn" : "grounding-ok")}>
+      {limited ? "⚠" : "✓"} Evidence check: {g.verified}/{g.total} quotes found in the data
       {terms.length > 0 && <> · not in the data: <b>{terms.join(", ")}</b></>}
-      {!g.ok && <span className="muted"> · confidence limited</span>}
+      {limited && <span className="muted"> · confidence limited</span>}
+      {claims.length > 0 && (
+        <div className="grounding-claims">
+          A second reader could not find support in the data for:
+          <ul>{claims.map((c) => <li key={c}>{c}</li>)}</ul>
+        </div>
+      )}
     </div>
   );
 }

@@ -511,3 +511,6 @@ a.btn { text-decoration: none; color: var(--text); display: inline-block; }
   .confidence-bar > span { transition-duration: 0ms; }
   .save-bar { transition: opacity 120ms ease; transform: translate(-50%, 0); }
 }
+
+.grounding-claims { margin-top: 6px; color: var(--text); }
+.grounding-claims ul { margin: 4px 0 0; padding-left: 18px; }

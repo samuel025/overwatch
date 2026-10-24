@@ -94,6 +94,7 @@ class LLMConfig:
     max_steps: int = 8
     triage_model: str = ""  # optional fast model for a first guess while the deep investigation runs
     triage_extra_body: dict[str, Any] = field(default_factory=dict)  # provider options, e.g. turn off reasoning
+    critic: bool = True  # after a conclusion, the fast model lists claims the data does not show (needs triage_model)
     headers: dict[str, str] = field(default_factory=dict)
 
 
@@ -201,6 +202,7 @@ def load_config(path: str | Path) -> Config:
             max_steps=int(llm.get("max_steps", 8)),
             triage_model=llm.get("triage_model", ""),
             triage_extra_body=llm.get("triage_extra_body") or {},
+            critic=bool(llm.get("critic", True)),
             headers={str(k): str(v) for k, v in (llm.get("headers") or {}).items()},
         ),
         memory=raw.get("memory", {"type": "hmem", "url": "http://127.0.0.1:8099"}),

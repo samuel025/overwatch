@@ -73,6 +73,14 @@ or, when the evidence is sufficient:
 Every claim in root_cause must be backed by an item in "evidence"; quotes are checked against the data."""
 
 
+CRITIC_PROMPT = """You check a diagnosis against the data it was based on. You do not diagnose.
+Break the diagnosis into its statements of FACT (what happened, what state something was in, numbers, times, what
+caused what). Skip recommendations and hedged statements ("may", "likely"). For each statement, copy the exact text
+from the data that shows it: a value from a row, a timeline line, or an anomaly line. Copy it character for character.
+If nothing in the data shows the statement, leave "support" empty. Reply with exactly ONE JSON object:
+{"claims": [{"claim": "<the statement, from the diagnosis>", "support": "<exact text copied from the data, or empty>"}]}"""
+
+
 TRIAGE_PROMPT = """You are an on-call engineer giving a FAST first guess about a live production problem.
 You cannot run queries. Base the guess on the CURRENT evidence: the anomalies and the evidence pack
 (container state, error messages, recent changes, per-service metrics). Past incidents are only hints;
@@ -214,6 +222,7 @@ class Investigator:
             if action.get("action") == "conclude" and str(action.get("root_cause", "")).strip():
                 self._conclude(incident, action)
                 self._ground(incident, timeline)
+                self.critique(incident, timeline)
                 self.emit("investigator.concluded", incident=incident.id, root_cause=incident.root_cause,
                           confidence=incident.confidence, severity=incident.severity,
                           recommended_actions=incident.recommended_actions)
@@ -282,6 +291,42 @@ class Investigator:
         if incident.hypothesis.get("text") and guess.get("verdict") == "disagree" and not str(guess.get("why", "")).strip():
             incident.reasoning.append("Disagrees with the first guess without saying why: treat as two competing explanations")
             incident.confidence = min(incident.confidence, 0.5)
+
+    def critique(self, incident: Incident, timeline: list[str] | None = None) -> list[str]:
+        """The fast model lists claims in the conclusion that the data does not show (a cheap second reader; it does
+        not diagnose). They are shown with the diagnosis and cap its confidence."""
+        model = self.cfg.llm.triage_model
+        if not (self.cfg.llm.critic and model and incident.root_cause):
+            return []
+        data = ["Timeline:\n" + "\n".join(timeline or []),
+                "Anomalies:\n" + "\n".join(f"- {a.summary()}" for a in incident.anomalies)]
+        data += [f"Evidence pack, {ev.note.removeprefix('[pack] ')}: " + (f"ERROR {ev.error}" if ev.error else _clip(ev.rows, 1500))
+                 for ev in incident.pack]
+        data += [f"Query result ({ev.source}: {ev.query[:120]}): " + (f"ERROR {ev.error}" if ev.error else _clip(ev.rows, 1500))
+                 for ev in incident.evidence]
+        messages = [{"role": "system", "content": CRITIC_PROMPT},
+                    {"role": "user", "content": f"Diagnosis:\n{incident.root_cause}\n\nData:\n" + "\n\n".join(data)}]
+        try:
+            reply = self.llm.chat_json(messages, model, agent="critic", extra_body=self.cfg.llm.triage_extra_body)
+        except LLMError as e:
+            incident.reasoning.append(f"critic unavailable: {e}")
+            return []
+        corpus = grounding._norm("\n\n".join(data))
+        claims = []
+        for item in (reply.get("claims") or []):
+            if not isinstance(item, dict) or not str(item.get("claim", "")).strip():
+                continue
+            support = str(item.get("support", "")).strip()
+            if not support or not grounding._found(support, corpus, empty_result=True):  # the quote must really be in the data
+                claims.append(str(item["claim"]).strip()[:240])
+        claims = claims[:5]
+        incident.grounding["unsupported_claims"] = claims
+        if claims:
+            incident.reasoning.append("A second reader found statements the data does not show: " + " | ".join(claims))
+            if incident.confidence > 0.6:
+                incident.reasoning.append(f"Confidence capped at 60% (was {incident.confidence:.0%}) because of them.")
+                incident.confidence = 0.6
+        return claims
 
     @staticmethod
     def _cap_by_suspect(incident: Incident, timeline: list[str]) -> None:
