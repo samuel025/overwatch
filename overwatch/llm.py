@@ -27,12 +27,13 @@ class LLM:
         if not cfg.base_url:
             raise LLMError("llm.base_url is empty: start Nightshift and set LLM_BASE_URL")
         self.cfg = cfg
-        # Nightshift identifies the calling app and request scope through these headers. A call gets 150 s (a cold
-        # model load can take minutes, the slowest investigation step on record took 70 s); the SDK's own retries are
+        cfg.base_url = normalize_base_url(cfg.base_url)
+        # Nightshift identifies the calling app and request scope through these headers. A call gets 180 s (Meterless
+        # Runtime's own limit; a cold model load can take minutes, the slowest investigation step on record took 70 s); the SDK's own retries are
         # off, because _create retries with a policy of its own and the two would multiply.
         headers = {"meterless-app": "overwatch", "meterless-scope": "user", **cfg.headers}
         self.client = OpenAI(
-            base_url=cfg.base_url, api_key=cfg.api_key or "none", default_headers=headers, timeout=150, max_retries=0
+            base_url=cfg.base_url, api_key=cfg.api_key or "none", default_headers=headers, timeout=180, max_retries=0
         )
         self.trace_path = Path(trace_dir) / "llm_calls.jsonl"
         self.trace_path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,12 +157,43 @@ def extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
-def probe(base_url: str, api_key: str = "", timeout: float = 15) -> dict[str, Any]:
-    """Check an AI provider. A Meterless Runtime (answers /healthz) gets its extra checks: the placeholder
-    token `rt-local` is rejected, and the app headers are sent."""
+def normalize_base_url(url: str) -> str:
+    """`http://host:8088`, `.../v1` and `.../v1/` all mean the same endpoint; the client wants `<host>/v1`."""
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        return url
+    if url.endswith("/chat/completions"):
+        url = url.removesuffix("/chat/completions")
+    return url if url.endswith("/v1") else f"{url}/v1"
+
+
+RUNTIME_PORTS = (8088, 8090, 8787, 11434)
+RUNTIME_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+
+
+def detect_runtime() -> str | None:
+    """Look for a local Meterless Runtime the way its own Auto Detect does: well-known ports, three loopback names."""
     import httpx
 
-    root = base_url.rstrip("/").removesuffix("/v1")
+    for port in RUNTIME_PORTS:
+        for host in RUNTIME_HOSTS:
+            try:
+                if httpx.get(f"http://{host}:{port}/healthz", timeout=1).status_code == 200:
+                    return f"http://{host}:{port}/v1"
+            except Exception:
+                continue
+    return None
+
+
+def probe(base_url: str, api_key: str = "", timeout: float = 15) -> dict[str, Any]:
+    """Check an AI provider. A Meterless Runtime (answers /healthz) gets its extra checks: the placeholder
+    token `rt-local` is rejected, the app headers are sent, and 401/403 (running, not authorised) is told apart from
+    offline. /healthz only proves the process is up; a 200 from /v1/models with `meterless/*` ids proves it is usable."""
+    import httpx
+    import openai
+
+    base_url = normalize_base_url(base_url)
+    root = base_url.removesuffix("/v1")
     runtime = False
     try:
         runtime = httpx.get(f"{root}/healthz", timeout=3).status_code == 200
@@ -174,6 +206,9 @@ def probe(base_url: str, api_key: str = "", timeout: float = 15) -> dict[str, An
         client = OpenAI(base_url=base_url, api_key=api_key or "none", timeout=timeout, max_retries=0,
                         default_headers={"meterless-app": "overwatch", "meterless-scope": "user"} if runtime else None)
         models = [m.id for m in client.models.list().data]
+    except (openai.AuthenticationError, openai.PermissionDeniedError):
+        who = "Meterless Runtime is running but" if runtime else "The provider"
+        return {"ok": False, "error": f"{who} did not accept the token (401/403). Use the token in <stateDir>/proxy-token."}
     except Exception as e:
         return {"ok": False, "error": f"{e.__class__.__name__}: {str(e)[:200]}"}
-    return {"ok": True, "models": models[:200], "meterless_runtime": runtime}
+    return {"ok": True, "models": models[:200], "meterless_runtime": runtime and any(m.startswith("meterless/") for m in models)}
