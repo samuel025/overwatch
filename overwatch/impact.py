@@ -19,13 +19,12 @@ from .sources import DataSource, SourceError
 _OPS = {">": operator.gt, ">=": operator.ge, "<": operator.lt, "<=": operator.le, "x_normal": operator.gt}
 
 
-def incident_start(anomalies: list[Anomaly], history: dict[str, deque], detected_at: float) -> float:
-    """Earliest sample of the unbroken run of bad values that led to each anomaly."""
-    start = detected_at
+def check_starts(anomalies: list[Anomaly], history: dict[str, deque], detected_at: float) -> dict[str, float]:
+    """For each anomaly, the earliest sample of the unbroken run of bad values behind it (its own start)."""
+    starts: dict[str, float] = {}
     for a in anomalies:
+        start = detected_at
         samples = list(history.get(a.check, []))
-        if not samples:
-            continue
 
         def bad(v: float | None) -> bool:
             if a.comparison in ("no_data", "error"):
@@ -39,7 +38,13 @@ def incident_start(anomalies: list[Anomaly], history: dict[str, deque], detected
             earliest = t
         if earliest is not None:
             start = min(start, earliest)
-    return start
+        starts[a.check] = min(start, starts.get(a.check, start))
+    return starts
+
+
+def incident_start(anomalies: list[Anomaly], history: dict[str, deque], detected_at: float) -> float:
+    """Earliest sample of the unbroken run of bad values that led to each anomaly."""
+    return min([detected_at, *check_starts(anomalies, history, detected_at).values()])
 
 
 def spread(topology: dict[str, list[str]], origin: str | None, failing: set[str]) -> dict[str, Any]:

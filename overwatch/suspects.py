@@ -110,38 +110,52 @@ def _describe(container: str, group: list[tuple[float, dict[str, Any]]]) -> Susp
     return Suspect(group[0][0], service, kind, what)
 
 
-def annotate(suspects: list[Suspect], started_at: float,
-             failing_between: Callable[[float, float], bool]) -> list[str]:
-    """Lines for the incident timeline, nearest suspect before the problem first. `failing_between(a, b)` says whether
-    any check was failing between two unix times."""
+def annotate(suspects: list[Suspect], started_at: float, failing_between: Callable[[float, float], bool],
+             starts: dict[str, float] | None = None) -> list[str]:
+    """Lines for the incident timeline, the suspect closest to a failure first. `starts` maps each failing check to the
+    time it began failing; each suspect is described against those, because an incident can hold two problems and an
+    event that came after the first check began failing may be exactly what started another. `failing_between(a, b)`
+    says whether any check was failing between two unix times."""
     def clock(t: float) -> str:
         return datetime.fromtimestamp(t, timezone.utc).strftime("%H:%M:%S")
 
+    starts = starts or {"the failing checks": started_at}
     seen, unique = set(), []
     for s in sorted(suspects, key=lambda s: s.ts):
         key = (round(s.ts), s.service, s.what[:40])
         if key not in seen and started_at - WINDOW_SECONDS <= s.ts:
             seen.add(key)
             unique.append(s)
-    before = sorted((s for s in unique if s.ts <= started_at + 15), key=lambda s: -s.ts)[:MAX_SUSPECTS]
-    after = sorted((s for s in unique if s.ts > started_at + 15), key=lambda s: s.ts)[:3]
-
-    header = f"- Suspect events (computed from the change log and container events; the problem began at {clock(started_at)} UTC):"
-    if not before and not after:
+    if not unique:
         return ["- No change or container event was recorded in the hour before the problem began, so the trigger may be "
                 "external, gradual or not tracked. Do not name a cause the data does not show."]
-    lines = [header]
-    for i, s in enumerate(before, 1):
-        gap = started_at - s.ts
-        if gap <= IMMEDIATE_SECONDS:
-            note = f"{max(0, round(gap))} s before the problem began: immediately before."
-        elif failing_between(s.ts + 45, started_at - 20):
-            note = f"{gap / 60:.0f} min before; checks were already failing in between, so another problem was in progress."
+
+    def following(s: Suspect) -> list[tuple[float, str]]:
+        return sorted((t0 - s.ts, name) for name, t0 in starts.items() if t0 >= s.ts - 15)
+
+    def rank(s: Suspect) -> tuple[int, float]:
+        nxt = following(s)
+        return (0, nxt[0][0]) if nxt else (1, -s.ts)  # nearest to a failure first; events after every failure began last
+
+    ranked = sorted(unique, key=rank)[:MAX_SUSPECTS]
+    begins = ", ".join(f"{name} {clock(t0)}" for name, t0 in sorted(starts.items(), key=lambda kv: kv[1])[:6])
+    lines = [f"- Suspect events (computed from the change log and container events). Checks began failing at: {begins} UTC."]
+    for i, s in enumerate(ranked, 1):
+        nxt = following(s)
+        if nxt:
+            gap, name = nxt[0]
+            names = ", ".join(n for g, n in nxt if g - gap <= 60)[:120]
+            before = [n for n, t0 in starts.items() if t0 < s.ts - 15]
+            earlier = f" ({', '.join(before[:3])} had already been failing)" if before else ""
+            if gap <= IMMEDIATE_SECONDS:
+                note = f"{max(0, round(gap))} s before {names} began failing: immediately before{earlier}."
+            elif failing_between(s.ts + 45, s.ts + gap - 20):
+                note = f"{gap / 60:.0f} min before {names} began failing; other checks were already failing in between{earlier}."
+            else:
+                note = (f"{gap / 60:.0f} min before {names} began failing; no check failed in the {gap / 60:.0f} minutes after it, "
+                        f"so only a delayed effect (a leak, a cache expiring, a scheduled job) could link it{earlier}.")
         else:
-            note = (f"{gap / 60:.0f} min before; no check failed in the {gap / 60:.0f} minutes after it, so only a delayed "
-                    "effect (a leak, a cache expiring, a scheduled job) could link it to this problem.")
+            note = (f"every failing check had already begun failing before it ({', '.join(list(starts)[:3])}), so it did not start "
+                    "those; it can only belong to a separate problem or be a response to them.")
         lines.append(f"  S{i} {clock(s.ts)} {s.kind} on {s.service}: {s.what}. {note}")
-    for j, s in enumerate(after, len(before) + 1):
-        lines.append(f"  S{j} {clock(s.ts)} {s.kind} on {s.service}: {s.what}. {round(s.ts - started_at)} s AFTER the problem "
-                     "began: a consequence or a response, not the cause.")
     return lines

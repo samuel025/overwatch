@@ -20,7 +20,7 @@ from .agents import Historian, Investigator, Responder, Watcher
 from .config import Config, EvidenceConfig
 from .events import EventBus
 from .telemetry import DockerTelemetry
-from .impact import incident_start, measure, spread, timestamp_literal
+from .impact import check_starts, incident_start, measure, spread, timestamp_literal
 from .listeners import LISTENER_TYPES
 from .llm import LLM
 from .memory import build_memory
@@ -350,7 +350,7 @@ class Overwatch:
 
         lines = [f"- The problem started at {clock(started)} UTC (first failing signal); "
                  f"Overwatch detected it at {clock(detected)} UTC."]
-        lines += self._suspect_lines(incident, started)
+        lines += self._suspect_lines(incident, started, check_starts(incident.anomalies, self.watcher.history, detected))
         lines += [f"- Pushed event at {clock(d['since'])} UTC: {d['detail']}" for d in down.values()]
         signals = []
         for c in self.cfg.checks:
@@ -369,7 +369,7 @@ class Overwatch:
                          "(positive = before the problem started, negative = after).")
         return lines
 
-    def _suspect_lines(self, incident: Incident, started: float) -> list[str]:
+    def _suspect_lines(self, incident: Incident, started: float, starts: dict[str, float]) -> list[str]:
         """What changed or restarted before the problem began, ranked, with the timing facts (see suspects.py)."""
         from . import suspects as sus
 
@@ -399,7 +399,7 @@ class Overwatch:
                     "SELECT count(*) FROM check_samples WHERE failing = 1 AND ts > :a AND ts < :b",
                     a=iso(a), b=iso(b))[0][0] > 0
 
-            return sus.annotate(found, started, failing_between)
+            return sus.annotate(found, started, failing_between, starts)
         except Exception as e:  # suspects are a help, never a reason to fail an investigation
             self.events.emit("source.error", message=f"building the suspect list: {e}")
             return []

@@ -37,7 +37,9 @@ How to work:
 - A change shortly before the problem is a suspect, not proof. Show the mechanism that links it to the symptom.
 - The timeline lists suspect events (S1, S2...) that Overwatch computed, with how long before the problem each
   happened and whether anything failed in between. Say which suspect your conclusion rests on. A suspect marked
-  as AFTER the problem began, or one after which the system ran clean for minutes, is unlikely to be the cause.
+  as coming after every failing check had already begun, or one after which the system ran clean for minutes, is
+  unlikely to have started that problem. Two separate problems can overlap in one incident: judge each suspect
+  against the checks that began failing right after it.
   If none of them explains the problem, say so and name the trigger as unknown instead of picking one.
 - Timing alone never proves cause. A change counts as the cause only if it touches the failing service or
   something it depends on (see the topology) AND you can name how it produces the symptom. Changes to
@@ -339,7 +341,7 @@ class Investigator:
         if not re.fullmatch(r"S\d+", label):
             return
         line = next((l for l in timeline if l.strip().startswith(label + " ")), "")
-        weak = ("AFTER the problem" in line) or ("only a delayed" in line) or ("already failing" in line)
+        weak = ("did not start" in line) or ("only a delayed" in line) or ("already failing in between" in line)
         if weak and incident.confidence > 0.5:
             incident.reasoning.append(
                 f"Confidence capped at 50% (was {incident.confidence:.0%}): the suspect it relies on ({label}) does not "
