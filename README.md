@@ -304,17 +304,38 @@ Overwatch does not plug into your services. It reads the data they already produ
 | Container/host metrics (CPU, memory, restarts, OOM kills, running state) | find leaks, crashes, saturation; know if a service is alive | Kubernetes/cAdvisor, Docker |
 | Past incident tickets | give the Historian something to remember | Jira export |
 
-### Problems it detects with no checks written
+### Issues it can detect and explain
 
-Connect Docker, Prometheus and a database and discovery adds these checks for you:
+**Detected on their own** (checks that discovery writes for you, or that you add): these open an incident.
 
-| Problem | How it is seen |
+| Issue | How it is seen |
 |---|---|
-| A service stopped, killed or paused | the container is not running (or stops answering its health URL) |
-| A service answering errors or slowly | error rate and latency from Prometheus or a metrics table, against its own recent baseline |
+| A service stopped, crashed or killed | the container is not running; the map shows "Not responding" |
+| A service frozen or paused (running but not answering) | its health URL or heartbeat goes silent |
+| A service returning errors | error rate above its limit or far above its own recent normal |
+| A slow service or endpoint | p95 latency above its limit or above its own baseline |
 | A silent service | a heartbeat that stops arriving |
-| **Database connections nearly used up** | Postgres: share of `max_connections` in use, warns above 85% (`<db>_connections_used_pct`) before the app is refused |
-| Slow queries, locks, a dropped index | not triggers themselves: Overwatch finds them in `pg_stat_activity`, `pg_locks` and `pg_stat_statements` once a symptom opens an incident |
+| A database connection pool nearly full | Postgres connections in use above 85% of `max_connections` (`<db>_connections_used_pct`), before the app is refused |
+| A database down or unreachable | its container check fails and its callers' errors rise |
+| Memory leak, restart loop, out-of-memory kills | repeated container stops and restarts |
+| Traffic surge | request rate far above baseline |
+| A third party failing (rate limit, expired certificate, outage) | errors on calls to an external host, found in the logs |
+| Any number you can query | add a `metric` check: a SQL or PromQL query, a limit, a service |
+
+**Found during the investigation** (not triggers on their own; Overwatch looks for them once a symptom opens an incident):
+
+| Cause | Where the evidence comes from |
+|---|---|
+| A bad release or a config change just before it began | deploy and change history, lined up against the start time |
+| A dropped index or a slow query | `pg_indexes`, `pg_stat_statements`, scan statistics |
+| A lock held by an idle session | `pg_stat_activity`, `pg_locks` |
+| A batch job or heavy query hogging the database | `pg_stat_activity` |
+| A wrong timeout or pool size | config changes and error messages |
+| A retry storm, or an N+1 query pattern | call counts and logs |
+| One bad replica of a service | per-instance metrics |
+| The wrong suspect | a service that only looks guilty because it is the one that reports the error (the blast radius separates *cause*, *affected* and *at risk*) |
+
+**What is verified.** The 18 injectable faults in the demo shop are all caught by the Watcher (see [section 11](#11-the-demo-system-and-its-19-faults) and `eval/fault-verification.md`; `service_down` was checked in live runs). Slow query, bad deploy, lock contention and a wrong timeout were also diagnosed correctly and graded by hand on the demo shop. On a second, real Docker Compose app (a URL shortener) these were run live: a killed Redis, a killed and a paused Postgres, slow queries, and connection exhaustion. Kubernetes and Loki are implemented but have not yet been run against a real cluster. There is no accuracy benchmark across all faults yet.
 
 The more of this you connect, the better the investigations. You do not need a logs table or a metrics table: Docker, Kubernetes and Loki are read directly from their own APIs.
 
