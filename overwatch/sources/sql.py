@@ -7,13 +7,13 @@ and inside a read-only transaction where the database supports it.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import create_engine, text
 
-from .base import DataSource, SourceError
+from .base import DataSource, SourceError, duration_text
 
 _FORBIDDEN = re.compile(
     r"\b(insert|update|delete|merge|drop|alter|create|truncate|grant|revoke|copy|call|execute|vacuum|attach)\b",
@@ -33,6 +33,8 @@ def check_read_only(sql: str) -> str:
 
 
 def _jsonable(v: Any) -> Any:
+    if isinstance(v, timedelta):
+        return duration_text(v)
     if isinstance(v, (datetime, date)):
         return v.isoformat()
     if isinstance(v, Decimal):

@@ -15,12 +15,12 @@ import hashlib
 import math
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from .base import DataSource, SourceError
+from .base import DataSource, SourceError, duration_text
 from .sql import check_read_only
 
 _META = re.compile(r"^(show|describe|desc)\b", re.IGNORECASE)
@@ -53,6 +53,8 @@ def reachable(url: str) -> str:
 
 
 def _jsonable(v: Any) -> Any:
+    if isinstance(v, timedelta):
+        return duration_text(v)
     if isinstance(v, float) and not math.isfinite(v):
         return None  # NaN/Infinity are not valid JSON
     if isinstance(v, (datetime, date)):

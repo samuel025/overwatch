@@ -27,3 +27,15 @@ class DataSource(ABC):
 
     def close(self) -> None:
         pass
+
+
+def duration_text(delta) -> str:
+    """A duration as plain text with a unit. Python's own str() writes a tiny negative interval as
+    "-1 day, 23:59:59.996", which a reader (or a model) takes for a day."""
+    seconds = delta.total_seconds()
+    mag = abs(seconds)
+    if mag < 120:
+        return f"{seconds:.2f} s"
+    if mag < 7200:
+        return f"{seconds / 60:.1f} min"
+    return f"{seconds / 3600:.1f} h"

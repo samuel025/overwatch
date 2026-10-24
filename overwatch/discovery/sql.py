@@ -182,7 +182,7 @@ def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direc
         evidence.append({
             "name": f"{name}_db_activity", "label": f"Busy or waiting sessions on {name}", "source": name,
             "query": "SELECT application_name, state, wait_event_type, wait_event, left(query, 120) AS query, "
-                     "now() - query_start AS running_for FROM pg_stat_activity "
+                     "clock_timestamp() - query_start AS running_for FROM pg_stat_activity "
                      "WHERE state <> 'idle' AND pid <> pg_backend_pid() ORDER BY query_start LIMIT 10",
         })
 

@@ -142,3 +142,16 @@ def test_prometheus_nan_and_infinity_become_null():
     from overwatch.sources.prometheus import _num
 
     assert _num("NaN") is None and _num("+Inf") is None and _num("-Inf") is None and _num("2.5") == 2.5
+
+
+def test_durations_are_plain_text_never_pythons_minus_one_day():
+    from datetime import timedelta
+
+    from overwatch.sources.base import duration_text
+    from overwatch.sources.sql import _jsonable
+
+    assert duration_text(timedelta(seconds=-0.003)) == "-0.00 s"  # was "-1 day, 23:59:59.997": read as a day
+    assert duration_text(timedelta(seconds=2.5)) == "2.50 s"
+    assert duration_text(timedelta(minutes=5)) == "5.0 min"
+    assert duration_text(timedelta(hours=3)) == "3.0 h"
+    assert _jsonable(timedelta(seconds=-0.003)) == "-0.00 s"
