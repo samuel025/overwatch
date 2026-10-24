@@ -36,6 +36,27 @@ def ago(target: str, n: int, unit: str) -> str:
     return f"now() - interval '{n} {unit}'"
 
 
+def write_warning(name: str, account: dict[str, Any] | None) -> str | None:
+    """A note when the database account Overwatch connects with can change data (None when it is read-only)."""
+    if not account:
+        return None
+    why = []
+    if account["superuser"]:
+        why.append("is a superuser")
+    if account["writable_tables"]:
+        n = account["writable_tables"]
+        why.append(f"can write to {n} table{'s' if n != 1 else ''}")
+    if account["can_create"] and not account["superuser"]:
+        why.append("can create objects in the public schema")
+    if not why:
+        return None
+    return (f"{name}: the account Overwatch connects with ('{account['user']}') {' and '.join(why)}. Overwatch only ever runs "
+            "SELECT queries (checked in code and run in a read-only transaction), but give it a read-only account so a mistake "
+            f"cannot become damage: CREATE ROLE overwatch LOGIN PASSWORD '...'; GRANT CONNECT ON DATABASE {account['database']} "
+            "TO overwatch; GRANT USAGE ON SCHEMA public TO overwatch; GRANT SELECT ON ALL TABLES IN SCHEMA public TO overwatch; "
+            "GRANT pg_read_all_stats TO overwatch; then use that account in the connection string.")
+
+
 def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direct") -> dict[str, Any]:
     """Inspect a database. `target` is where the generated checks and evidence will run: "direct" (its own
     dialect, plain table names) or "zetaris" (Spark SQL, tables qualified as <name>.<table>)."""
@@ -79,6 +100,17 @@ def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direc
                 pg_health["pg_stat_activity"] = True
             except Exception:
                 pg_health["pg_stat_activity"] = False
+                conn.rollback()
+            try:  # what could this account change? Overwatch only reads, so anything it can write is needless exposure
+                row = conn.execute(text(
+                    "SELECT current_user, current_database(), (SELECT rolsuper FROM pg_roles WHERE rolname = current_user), "
+                    "(SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    " WHERE c.relkind IN ('r', 'p') AND n.nspname = 'public' "
+                    " AND has_table_privilege(current_user, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE')), "
+                    "has_schema_privilege(current_user, 'public', 'CREATE')")).first()
+                pg_health["account"] = {"user": row[0], "database": row[1], "superuser": bool(row[2]),
+                                        "writable_tables": int(row[3]), "can_create": bool(row[4])}
+            except Exception:
                 conn.rollback()
             try:  # other users' sessions show state and query only to a superuser or a pg_read_all_stats member
                 pg_health["activity_details"] = bool(conn.execute(text(
@@ -210,6 +242,8 @@ def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direc
         })
 
     notes = []
+    if pg and (w := write_warning(name, pg_health.get("account"))):
+        notes.append(w)
     if pg:
         if not pg_health.get("activity_details"):
             notes.append(f"{name}: Overwatch's database user cannot see other sessions' queries. Run "

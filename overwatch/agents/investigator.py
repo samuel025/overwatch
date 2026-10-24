@@ -77,7 +77,7 @@ Every claim in root_cause must be backed by an item in "evidence"; quotes are ch
 
 
 CRITIC_SECONDS = 25   # optional extras never hold up the diagnosis: one attempt, this long
-TRIAGE_SECONDS = 30
+TRIAGE_SECONDS = 45
 
 CRITIC_PROMPT = """You check a diagnosis against the data it was based on. You do not diagnose.
 Break the diagnosis into its statements of FACT (what happened, what state something was in, numbers, times, what

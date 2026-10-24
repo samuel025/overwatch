@@ -36,7 +36,7 @@ class LocalMemory(Memory):
             f.write(json.dumps(rec) + "\n")
         return rec["id"]
 
-    def recall(self, symptoms: str, top_n: int = 3) -> list[dict[str, Any]]:
+    def recall(self, symptoms: str, top_n: int = 3, threshold: float | None = None) -> list[dict[str, Any]]:
         q = _tokens(symptoms)
         scored = []
         for rec in self._all():
@@ -53,5 +53,5 @@ class NoMemory(Memory):
     def remember(self, incident: Incident) -> str | None:
         return None
 
-    def recall(self, symptoms: str, top_n: int = 3) -> list[dict[str, Any]]:
+    def recall(self, symptoms: str, top_n: int = 3, threshold: float | None = None) -> list[dict[str, Any]]:
         return []

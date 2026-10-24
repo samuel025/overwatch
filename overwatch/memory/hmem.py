@@ -45,8 +45,11 @@ class HMEMMemory(Memory):
         )
         return data["memory"]["id"]
 
-    def recall(self, symptoms: str, top_n: int = 3) -> list[dict[str, Any]]:
-        data = self._post("/recall", {"query": symptoms, "topN": top_n})
+    def recall(self, symptoms: str, top_n: int = 3, threshold: float | None = None) -> list[dict[str, Any]]:
+        body: dict[str, Any] = {"query": symptoms, "topN": top_n}
+        if threshold is not None:
+            body["threshold"] = threshold
+        data = self._post("/recall", body)
         return [
             {"id": m["id"], "content": m["content"], "relevance": round(m["relevance"], 3), "tags": m.get("tags", [])}
             for m in data["memories"]

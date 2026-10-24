@@ -228,3 +228,17 @@ def test_postgres_gets_a_connection_saturation_check_on_its_own_service(monkeypa
         assert "max_connections" in check["query"]
         slow = next(c for c in plan["checks"] if c["name"] == "main_longest_query_seconds")
         assert slow["service"] == "postgres" and slow["source"] == check["source"] and "pg_stat_activity" in slow["query"]
+
+
+def test_write_warning_only_for_accounts_that_can_change_data():
+    from overwatch.discovery.sql import write_warning
+
+    base = {"user": "overwatch", "database": "shop", "superuser": False, "writable_tables": 0, "can_create": False}
+    assert write_warning("db", base) is None                                    # a read-only account: nothing to say
+    assert write_warning("db", None) is None                                    # could not tell: stay quiet
+    sup = write_warning("db", {**base, "user": "postgres", "superuser": True})
+    assert "superuser" in sup and "CREATE ROLE overwatch" in sup and "ON DATABASE shop" in sup
+    rw = write_warning("db", {**base, "writable_tables": 3})
+    assert "can write to 3 tables" in rw and "pg_read_all_stats" in rw
+    assert "can write to 1 table." in write_warning("db", {**base, "writable_tables": 1})  # singular
+    assert "create objects" in write_warning("db", {**base, "can_create": True})

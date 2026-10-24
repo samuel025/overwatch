@@ -16,7 +16,7 @@ class Memory(ABC):
         """Store a confirmed incident; return the memory id."""
 
     @abstractmethod
-    def recall(self, symptoms: str, top_n: int = 3) -> list[dict[str, Any]]:
+    def recall(self, symptoms: str, top_n: int = 3, threshold: float | None = None) -> list[dict[str, Any]]:
         """Return similar past incidents: [{id, content, relevance, tags}]."""
 
     def feedback(self, memory_id: str, kind: str) -> None:

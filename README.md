@@ -362,6 +362,8 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO overwatch;
 GRANT pg_read_all_stats TO overwatch;
 ```
 
+The setup wizard checks which account you connected with. If it is a superuser or can write to your tables it says so, with the exact `CREATE ROLE` to run, so Overwatch never holds more access than it uses (it only ever runs `SELECT`, checked in code and run in a read-only transaction).
+
 Nothing else needs changing: no logging settings, no `track_*` settings, no extensions other than `pg_stat_statements`, and Overwatch never writes to your database.
 
 ### Connecting: three ways

@@ -54,7 +54,7 @@ class RecordingMemory(Memory):
         self.stored.append(incident.id)
         return "mem-9"
 
-    def recall(self, symptoms, top_n=3):
+    def recall(self, symptoms, top_n=3, threshold=None):
         return []
 
     def feedback(self, memory_id, kind):
@@ -479,3 +479,23 @@ def test_optional_model_calls_get_one_bounded_attempt_and_timeouts_are_not_retri
     except openai.APITimeoutError:
         pass
     assert len(calls) == 2  # a stalled provider: one retry, not five waits of minutes
+
+
+def test_historian_asks_memory_with_raw_check_names_a_capped_context_and_a_lower_threshold():
+    from overwatch.agents.historian import Historian
+    from overwatch.models import Anomaly
+
+    seen = {}
+
+    class Spy:
+        def recall(self, symptoms, top_n=3, threshold=None):
+            seen.update(symptoms=symptoms, top_n=top_n, threshold=threshold)
+            return [{"id": "mem-1", "content": "x", "relevance": .4, "tags": []}]
+
+    a = Anomaly(check="event:postgres_down", service="postgres", value=0, threshold=1, comparison="<",
+                description="container stopped", detected_at="2026-10-24T10:00:00+00:00")
+    out = Historian(Spy()).recall([a], context="noise " * 500)
+    assert out[0]["id"] == "mem-1"
+    assert "event:postgres_down" in seen["symptoms"] and "event:postgres down" in seen["symptoms"]  # both spellings match memory text
+    assert "noise" not in seen["symptoms"]  # evidence text from the first seconds of an outage is left out of the search
+    assert seen["threshold"] == Historian.THRESHOLD < .35  # below the engine default
