@@ -62,6 +62,9 @@ class Overwatch:
         self.failing: set[str] = set()  # checks firing on the latest pass
         self.healthy_since: dict[str, float] = {}  # incident id -> when all its checks first looked healthy
         self._refreshes: dict[str, int] = {}  # incident id -> how often it was investigated again
+        self._healthy_streak: dict[str, float] = {}  # check -> when its current healthy stretch began
+        self._healed_at: dict[str, float] = {}  # check -> when it last failed after a sustained healthy stretch
+        self._opened_precisely: dict[str, float] = {}  # incident id -> exact open time (the stored one is whole seconds)
         self.pool = ThreadPoolExecutor(cfg.max_parallel_investigations, thread_name_prefix="investigation")
         # instance -> {service, since, detail} for containers a pushed event says are down
         self.down: dict[str, dict[str, Any]] = {}
@@ -225,6 +228,7 @@ class Overwatch:
         """One Watcher pass. New problems open an incident that is investigated in the background."""
         anomalies = self.watcher.run()
         self.failing = {a.check for a in anomalies}
+        self._note_streaks(time.time(), self.failing)
         self.last_check_at = now_iso()
         self._record_samples()
         self.events.emit("watch.tick", values=dict(self.watcher.last_values),
@@ -296,6 +300,7 @@ class Overwatch:
     def open_incident(self, anomalies: list[Anomaly]) -> Incident:
         incident = Incident(anomalies=anomalies)
         with self.lock:
+            self._opened_precisely[incident.id] = time.time()
             self.incidents[incident.id] = incident
             for a in anomalies:
                 self.last_opened[a.check] = time.time()
@@ -565,10 +570,24 @@ class Overwatch:
     def _active(self) -> list[Incident]:
         return [i for i in self.incidents.values() if i.status in ACTIVE_STATES and not i.recovered_at]
 
+    def _note_streaks(self, now: float, failing: set[str]) -> None:
+        """Remember when each check was last healthy for a sustained stretch before failing again. An incident that
+        stays open (nobody approved it, or another of its checks never recovers) must not swallow a check that
+        healed and then broke again: that is a new problem."""
+        for c in self.cfg.checks:
+            if c.name not in failing:
+                self._healthy_streak.setdefault(c.name, now)
+            else:
+                began = self._healthy_streak.pop(c.name, None)
+                if began is not None and now - began >= self.cfg.resolve_after_seconds:
+                    self._healed_at[c.name] = now
+
     def _covered(self, a: Anomaly) -> bool:
         """Already part of an ongoing incident, or reopened too soon after one (flap protection)."""
         with self.lock:
-            if any(a.check in {x.check for x in i.anomalies} for i in self._active()):
+            healed = self._healed_at.get(a.check, 0.0)
+            if any(a.check in {x.check for x in i.anomalies}
+                   and self._opened_precisely.get(i.id, float(_ts(i.opened_at))) > healed for i in self._active()):
                 return True
             return time.time() - self.last_opened.get(a.check, 0) < self.cfg.cooldown_seconds
 

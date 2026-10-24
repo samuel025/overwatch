@@ -392,3 +392,47 @@ def test_investigating_again_is_limited_and_never_touches_an_incident_someone_ac
     ow.check_once()
     assert first.status == "dismissed" and ow._refreshes.get(first.id, 0) == 0
     ow.stop()
+
+
+def _heal_and_break_again(make, set_value, **overrides):
+    ow = make(**overrides)
+    set_value("a", 50)
+    set_value("b", 50)
+    first = ow.check_once()
+    assert wait_for(lambda: first.status == "awaiting_approval")
+    set_value("a", 1)  # a recovers; b keeps failing, so the first incident never recovers and stays open
+    for _ in range(3):
+        ow.check_once()
+    assert not first.recovered_at
+    set_value("a", 50)  # a breaks again
+    result = None
+    for _ in range(3):
+        result = ow.check_once() or result
+    return ow, first, result
+
+
+def test_a_check_that_healed_and_broke_again_is_not_swallowed_by_an_old_open_incident(world):
+    make, set_value = world
+    ow, first, second = _heal_and_break_again(make, set_value, merge_window_seconds=0)  # the old incident is out of the window
+    assert second is not None and second is not first and len(ow.incidents) == 2
+    ow.stop()
+
+
+def test_inside_the_merge_window_that_problem_joins_the_incident_and_it_is_investigated_again(world):
+    make, set_value = world
+    ow, first, second = _heal_and_break_again(make, set_value)
+    assert second is first and len(ow.incidents) == 1  # one incident, not two
+    assert wait_for(lambda: any("investigating again" in line for line in first.reasoning))
+    ow.stop()
+
+
+def test_a_check_that_never_healed_stays_covered_by_its_open_incident(world):
+    make, set_value = world
+    ow = make()
+    set_value("a", 50)
+    first = ow.check_once()
+    assert wait_for(lambda: first.status == "awaiting_approval")
+    for _ in range(3):
+        assert ow.check_once() is None  # still failing, still the same incident
+    assert len(ow.incidents) == 1
+    ow.stop()
