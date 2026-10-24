@@ -278,7 +278,9 @@ def _injected_deploys() -> list[tuple[str, str]]:
     return sorted(set(re.findall(r'\bdeploy\("([^"]+)",\s*"([^"]+)"', Path(__file__).read_text())))
 
 
-def reset() -> None:
+def reset(clean_telemetry: bool = False) -> None:
+    """Undo every fault. clean_telemetry also empties the demo's logs and metrics, so the next fault starts from a blank
+    slate (the evaluation uses it: evidence windows of 5 to 15 minutes would otherwise include the previous fault)."""
     compose("start", "postgres")
     wait_for_db()
     # Faults record a deploy/config change; leaving them behind would mislead the next investigation
@@ -300,6 +302,9 @@ def reset() -> None:
     sql("shopdb", "CREATE INDEX IF NOT EXISTS orders_customer_id_idx ON orders (customer_id)")
     # Cumulative query statistics would still show the previous fault (e.g. an earlier DROP INDEX).
     sql("shopdb", "SELECT pg_stat_statements_reset()")
+    if clean_telemetry:
+        for table in ("app_logs", "request_metrics", "container_metrics"):
+            sql("opsdb", f"DELETE FROM {table}")
     for instance in INSTANCES:
         for _ in range(30):  # instances take a moment to come back after the restart
             try:

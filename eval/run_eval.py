@@ -129,7 +129,7 @@ def main() -> None:
     for name in args.faults:
         fault = FAULTS[name]
         print(f"== {name}", flush=True)
-        reset()
+        reset(clean_telemetry=True)  # the previous fault's logs must not leak into this one
         time.sleep(BASELINE_SECONDS)
         if not wait_until_healthy(Watcher(cfg.checks, build_sources(cfg.sources))):
             print("   skipped: system did not return to healthy after reset", flush=True)

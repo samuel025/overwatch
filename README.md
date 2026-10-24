@@ -120,6 +120,11 @@ flowchart LR
    ```
    This JSON-action protocol works with **any** OpenAI-compatible provider, even without native tool calling.
 5. The conclusion must list the explanations it considered (confirmed / ruled out, and why), quote the evidence it relied on, and say whether it agrees with the first guess. Overwatch **checks every quote and technical term against the data** (`overwatch/grounding.py`): a conclusion that cites things not in the data cannot claim more than 60% confidence. If the model uses its whole query budget without concluding, the incident is marked **failed** (never offered for approval empty-handed).
+
+   Three further checks aim at the usual way a diagnosis goes wrong, which is not a wrong number but a plausible story:
+   - **Ranked suspects** (`overwatch/suspects.py`). Overwatch computes, from the change log, the change evidence and the container events, every event in the hour before the problem began, and puts it in the timeline with the facts a model would otherwise guess: how long before the first failing check it was, whether the system ran clean after it, whether other checks were already failing, and whether its service is even in the failing path (the failing services, what they depend on, who calls them). The Investigator must name the suspect it relies on; a conclusion resting on one the timing or the topology argues against is capped at 50% confidence.
+   - **A critic pass.** The fast model breaks the conclusion into statements of fact and copies the exact supporting text for each; Overwatch checks that the text really is in the data. Statements with no verifiable support are shown in the console and cap confidence at 60%. It catches invented mechanisms (a health check that failed, a cold cache, a restart that "caused" it); it cannot catch a diagnosis whose statements are all true but which blames the wrong event.
+   - **Investigating again.** If new checks fire after a diagnosis but before anyone acts on it, or a check that had healed fails again, Overwatch investigates with fresh evidence (at most twice per incident).
 6. Overwatch computes the **blast radius**: start time (walking back through the check history), affected and at-risk services (from the topology), and business cost (from your impact queries).
 7. The console shows the diagnosis; a human approves or dismisses.
 8. When every check behind the incident has stayed healthy for a while, the incident is marked **recovered** and its final duration is recorded.
@@ -1039,6 +1044,7 @@ overwatch/                 the product (Python, system-agnostic)
   docker_api.py            read-only Docker Engine client
   listeners.py             pushed event streams (Docker events)
   grounding.py             checks a conclusion's quotes and terms against the data
+  suspects.py              ranks the events before a problem, with the timing facts and failing-path relevance
   orchestrator.py          pipeline, incident lifecycle, blast radius, evidence pack, timeline
   impact.py                start time, spread, business impact
   store.py                 SQLite incident store
