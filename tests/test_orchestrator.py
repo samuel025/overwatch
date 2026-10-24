@@ -554,3 +554,32 @@ def test_a_restart_keeps_a_diagnosis_that_was_already_written(world):
     assert again.incidents[done.id].status == "awaiting_approval"  # it had concluded; approve button comes back
     assert again.incidents[half.id].status == "failed"  # it never concluded
     again.stop()
+
+
+def test_simple_state_checks_need_a_short_wait_but_metric_checks_keep_the_full_one(world):
+    make, _ = world
+    ow = make(resolve_after_seconds=60)
+    for c in ow.cfg.checks:
+        c.kind = "container"
+    assert ow._recover_wait({"a_high", "b_high", "event:db_down"}) == 20  # running again: 20 s is enough
+    ow.cfg.checks[1].kind = "metric"  # one rolling-window metric in the mix: the full wait
+    assert ow._recover_wait({"a_high", "b_high"}) == 60
+    assert ow._recover_wait({"a_high"}) == 20
+    ow.cfg.resolve_after_seconds = 10
+    assert ow._recover_wait({"a_high"}) == 10  # never longer than the configured wait
+    ow.stop()
+
+
+def test_an_incident_shows_it_is_recovering_and_stops_if_the_problem_returns(world):
+    make, set_value = world
+    ow = make(resolve_after_seconds=3600)  # long enough that it cannot finish during the test
+    set_value("a", 50)
+    inc = ow.check_once()
+    assert inc.healthy_since is None
+    set_value("a", 1)
+    ow.check_once()
+    assert inc.healthy_since is not None and inc.recover_wait == 3600 and not inc.recovered_at  # confirming
+    set_value("a", 50)
+    ow.check_once()
+    assert inc.healthy_since is None  # relapse: the confirmation starts over
+    ow.stop()

@@ -670,8 +670,19 @@ class Overwatch:
         self.events.emit("incident.merged", incident=incident.id, checks=[a.check for a in anomalies])
         self.events.emit("incident.updated", incident=incident.to_dict())
 
+    STATE_RECOVERY_SECONDS = 20  # a container that is running again, or a health URL that answers, needs no long wait
+    STATE_KINDS = ("container", "probe", "heartbeat")
+
+    def _recover_wait(self, checks: set[str]) -> float:
+        """How long an incident's checks must stay healthy before it closes. Metric checks (latency, error rate) use
+        rolling windows and flap, so they keep the configured wait; if every check is a simple state check, a short
+        one is enough."""
+        kinds = {c.name: c.kind for c in self.cfg.checks}
+        simple = all(n.startswith("event:") or kinds.get(n) in self.STATE_KINDS for n in checks)
+        return float(min(self.cfg.resolve_after_seconds, self.STATE_RECOVERY_SECONDS) if simple else self.cfg.resolve_after_seconds)
+
     def _track_recovery(self, failing: set[str]) -> None:
-        """Recover an incident once every check behind it has stayed healthy for resolve_after_seconds."""
+        """Recover an incident once every check behind it has stayed healthy long enough (see _recover_wait)."""
         now = time.time()
         with self.lock:  # failed investigations too: the system can recover whether or not we explained it
             candidates = [i for i in self.incidents.values()
@@ -683,11 +694,21 @@ class Overwatch:
                 continue  # a human report or external alert has no check to watch; a human closes it
             if checks & failing:
                 self.healthy_since.pop(inc.id, None)
+                if inc.healthy_since is not None:  # it was recovering and relapsed
+                    inc.healthy_since = None
+                    self._save(inc)
+                    self.events.emit("incident.updated", incident=inc.to_dict())
                 continue
             since = self.healthy_since.setdefault(inc.id, now)
-            if now - since < self.cfg.resolve_after_seconds:
+            wait = self._recover_wait(checks)
+            if inc.healthy_since != since:  # tell the console it is confirming, so the wait is not a mystery
+                inc.healthy_since, inc.recover_wait = since, wait
+                self._save(inc)
+                self.events.emit("incident.updated", incident=inc.to_dict())
+            if now - since < wait:
                 continue
             inc.recovered_at = datetime.fromtimestamp(since, timezone.utc).isoformat(timespec="seconds")
+            inc.healthy_since = None
             inc.reasoning.append(f"Recovered: all checks healthy since {inc.recovered_at}")
             self.healthy_since.pop(inc.id, None)
             if inc.blast_radius:
@@ -698,6 +719,7 @@ class Overwatch:
 
     def _restore(self) -> None:
         for inc in self.store.load():
+            inc.healthy_since = None  # the confirmation clock lives in memory: start it again after a restart
             if inc.status == "investigating" and inc.root_cause and not inc.root_cause.startswith("Investigation failed"):
                 inc.status = "awaiting_approval"  # it had concluded; only the last bookkeeping step was lost
                 self.store.save(inc)

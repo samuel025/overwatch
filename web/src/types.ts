@@ -94,6 +94,8 @@ export interface Incident {
   origin_service: string | null;
   blast_radius: BlastRadius | Record<string, never>;
   recovered_at: string | null;
+  healthy_since?: number | null; // unix time its checks began to look healthy again (recovering)
+  recover_wait?: number; // seconds they must stay healthy before it closes
   pack: Evidence[];
   hypothesis: Hypothesis | Record<string, never>;
   started_at: number | null;

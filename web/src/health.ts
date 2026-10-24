@@ -67,3 +67,14 @@ export const STATE_LABEL: Record<NodeState, string> = {
   down: "Not responding",
   unknown: "No data",
 };
+
+/** Seconds left before a recovering incident closes, or null when it is not recovering. */
+export function recoverySecondsLeft(i: Incident, now = Date.now() / 1000): number | null {
+  if (i.recovered_at || !i.healthy_since || !i.recover_wait) return null;
+  return Math.max(0, Math.ceil(i.recover_wait - (now - i.healthy_since)));
+}
+
+/** Incidents whose problem has gone but whose diagnosis still waits for a person to approve or dismiss it. */
+export function awaitingAfterRecovery(order: string[], incidents: Record<string, Incident>): Incident[] {
+  return order.map((id) => incidents[id]).filter((i): i is Incident => !!i && !!i.recovered_at && i.status === "awaiting_approval");
+}

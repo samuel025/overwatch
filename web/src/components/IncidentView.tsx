@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { currentActivity, eventsFor } from "../activity";
 import { api, refreshMemory } from "../api";
 import { clock, duration, formatCheckValue, humanize, incidentHeadline } from "../format";
+import { recoverySecondsLeft } from "../health";
 import { useStore } from "../store";
 import type { BlastRadius, Evidence, ImpactItem, Incident, Memory, OwEvent } from "../types";
 
@@ -384,7 +385,13 @@ function Story({ incident }: { incident: Incident }) {
 
 export function IncidentView({ incident }: { incident: Incident }) {
   const events = useStore((s) => s.events);
-  const chip = incident.recovered_at ? { label: "Recovered", tone: "ok" } : STATUS_CHIP[incident.status];
+  useStore((s) => s.lastTick);  // re-render on every check pass, so the countdown moves
+  const left = recoverySecondsLeft(incident);
+  const chip = incident.recovered_at
+    ? { label: "Recovered", tone: "ok" }
+    : left !== null
+      ? { label: `Recovering · ${left}s`, tone: "info" }
+      : STATUS_CHIP[incident.status];
   const blast = "started_at" in incident.blast_radius ? (incident.blast_radius as BlastRadius) : null;
   const live = !incident.recovered_at && ["investigating", "awaiting_approval", "reported"].includes(incident.status);
   const failed = incident.status === "failed";

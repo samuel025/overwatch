@@ -144,7 +144,7 @@ export function Incidents() {
                 <span className="incident-row-text">
                   <span className="incident-row-title">{incidentHeadline(i)}</span>
                   <span className="muted small">
-                    {i.recovered_at ? "Recovered" : STATUS[i.status]} · {timeAgo(i.opened_at)}
+                    {i.recovered_at ? (i.status === "awaiting_approval" ? "Recovered · diagnosis waiting for you" : "Recovered") : STATUS[i.status]} · {timeAgo(i.opened_at)}
                   </span>
                 </span>
               </button>

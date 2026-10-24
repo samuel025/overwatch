@@ -71,6 +71,8 @@ class Incident:
     first_guess_verdict: dict[str, Any] = field(default_factory=dict)  # agree/disagree with the first guess
     grounding: dict[str, Any] = field(default_factory=dict)  # mechanical check of the conclusion against data
     suspect: str = ""  # the suspect event (S1, S2...) the conclusion rests on, or "none"
+    healthy_since: float | None = None  # unix time its checks all began to look healthy; None while any still fails
+    recover_wait: float = 0.0  # how long they must stay healthy before the incident closes (seconds)
 
     @property
     def services(self) -> list[str]:
