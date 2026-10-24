@@ -81,6 +81,7 @@ class EvidenceConfig:
     label: str
     source: str
     query: str  # may use {since}: a timestamp literal shortly before the incident started
+    suspects: bool = False  # the rows are a change log (ts, service, version, description): feed the suspect list
 
 
 @dataclass

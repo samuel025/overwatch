@@ -114,6 +114,7 @@ impact:  # business cost since the incident started; {since} is filled in by Ove
 evidence:
   - name: recent_changes
     label: Changes in the last 30 minutes
+    suspects: true
     source: opsdb
     query: >
       SELECT ts, service, version, description FROM deploys

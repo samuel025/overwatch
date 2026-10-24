@@ -436,3 +436,17 @@ def test_a_check_that_never_healed_stays_covered_by_its_open_incident(world):
         assert ow.check_once() is None  # still failing, still the same incident
     assert len(ow.incidents) == 1
     ow.stop()
+
+
+def test_the_timeline_the_investigator_reads_lists_the_recent_change_as_a_suspect(world):
+    make, set_value = world
+    ow = make()
+    ow.record_change("a", version="v2.0.0", kind="deploy", description="rewrote the lookup")
+    ow.record_change("a", version="config-9", kind="config", description="old", ts="2020-01-01T00:00:00+00:00")  # ancient
+    set_value("a", 50)
+    inc = ow.check_once()
+    lines = ow.build_timeline(inc)
+    text = "\n".join(lines)
+    assert "Suspect events" in text and "S1" in text and "v2.0.0" in text and "rewrote the lookup" in text
+    assert "config-9" not in text  # outside the hour before the problem
+    ow.stop()

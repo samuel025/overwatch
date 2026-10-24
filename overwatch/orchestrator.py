@@ -350,6 +350,7 @@ class Overwatch:
 
         lines = [f"- The problem started at {clock(started)} UTC (first failing signal); "
                  f"Overwatch detected it at {clock(detected)} UTC."]
+        lines += self._suspect_lines(incident, started)
         lines += [f"- Pushed event at {clock(d['since'])} UTC: {d['detail']}" for d in down.values()]
         signals = []
         for c in self.cfg.checks:
@@ -367,6 +368,41 @@ class Overwatch:
             lines.append("- Evidence-pack rows with a timestamp carry minutes_before_start "
                          "(positive = before the problem started, negative = after).")
         return lines
+
+    def _suspect_lines(self, incident: Incident, started: float) -> list[str]:
+        """What changed or restarted before the problem began, ranked, with the timing facts (see suspects.py)."""
+        from . import suspects as sus
+
+        def iso(t: float) -> str:
+            return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds")
+
+        found: list[sus.Suspect] = []
+        try:
+            cols = ("ts", "service", "version", "kind", "description")
+            found += sus.from_changes([dict(zip(cols, r)) for r in self.store.rows(
+                "SELECT ts, service, version, kind, description FROM changes ORDER BY ts DESC LIMIT 200")])
+            labels = {e.label for e in self.evidence if e.suspects}
+            for ev in incident.pack:
+                if ev.note.removeprefix("[pack] ") in labels and not ev.error:
+                    found += sus.from_changes(ev.rows)
+            cutoff = iso(started - sus.WINDOW_SECONDS - 60)
+            cols = ("ts", "service", "container", "action", "exit_code", "detail")
+            events = [dict(zip(cols, r)) for r in self.store.rows(
+                "SELECT ts, service, container, action, exit_code, detail FROM container_events WHERE ts > :c", c=cutoff)]
+            docker = next((n for n, s in self.cfg.sources.items() if s.get("type") == "docker"), None)
+            if not events and docker:  # direct mode: no telemetry tables, ask Docker
+                events = self.sources[docker].query("events 60")
+            found += sus.from_container_events(events)
+
+            def failing_between(a: float, b: float) -> bool:
+                return b > a and self.store.rows(
+                    "SELECT count(*) FROM check_samples WHERE failing = 1 AND ts > :a AND ts < :b",
+                    a=iso(a), b=iso(b))[0][0] > 0
+
+            return sus.annotate(found, started, failing_between)
+        except Exception as e:  # suspects are a help, never a reason to fail an investigation
+            self.events.emit("source.error", message=f"building the suspect list: {e}")
+            return []
 
     @staticmethod
     def _annotate(pack: list[Evidence], started: float) -> None:

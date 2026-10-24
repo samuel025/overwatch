@@ -7,6 +7,7 @@ provider (Nightshift routing modes, Nemotron, ...) without relying on native too
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Callable
 
@@ -34,6 +35,10 @@ How to work:
 - Use the incident timeline. A cause must start BEFORE (or exactly when) the problem started, usually just
   before. A change long before the start is unlikely to be the cause unless the data shows a delayed effect.
 - A change shortly before the problem is a suspect, not proof. Show the mechanism that links it to the symptom.
+- The timeline lists suspect events (S1, S2...) that Overwatch computed, with how long before the problem each
+  happened and whether anything failed in between. Say which suspect your conclusion rests on. A suspect marked
+  as AFTER the problem began, or one after which the system ran clean for minutes, is unlikely to be the cause.
+  If none of them explains the problem, say so and name the trigger as unknown instead of picking one.
 - Timing alone never proves cause. A change counts as the cause only if it touches the failing service or
   something it depends on (see the topology) AND you can name how it produces the symptom. Changes to
   unrelated services (other teams) are coincidences unless the data links them. If nothing explains why a
@@ -56,6 +61,7 @@ or, when the evidence is sufficient:
  "root_cause": "<one or two sentences: what broke, why, and what triggered it>",
  "confidence": <0.0-1.0>, "severity": "low|medium|high|critical",
  "origin_service": "<the service where the root cause lives, from the topology if one is given>",
+ "suspect": "<S1, S2... the suspect event your root cause rests on, or none>",
  "hypotheses": [{"cause": "<candidate cause>", "verdict": "confirmed|ruled out|possible",
                  "why": "<the evidence that decides it>"}],
  "evidence": [{"step": <step number, 0 = the evidence pack>,
@@ -271,10 +277,25 @@ class Investigator:
                 f"quotes verified, not found in the data: {', '.join(result['unsupported_terms']) or 'none'}"
             )
             incident.confidence = 0.6
+        self._cap_by_suspect(incident, timeline or [])
         guess = incident.first_guess_verdict
         if incident.hypothesis.get("text") and guess.get("verdict") == "disagree" and not str(guess.get("why", "")).strip():
             incident.reasoning.append("Disagrees with the first guess without saying why: treat as two competing explanations")
             incident.confidence = min(incident.confidence, 0.5)
+
+    @staticmethod
+    def _cap_by_suspect(incident: Incident, timeline: list[str]) -> None:
+        """A conclusion resting on a suspect that the timing argues against cannot be confident."""
+        label = incident.suspect.strip().upper()
+        if not re.fullmatch(r"S\d+", label):
+            return
+        line = next((l for l in timeline if l.strip().startswith(label + " ")), "")
+        weak = ("AFTER the problem" in line) or ("only a delayed" in line) or ("already failing" in line)
+        if weak and incident.confidence > 0.5:
+            incident.reasoning.append(
+                f"Confidence capped at 50% (was {incident.confidence:.0%}): the suspect it relies on ({label}) does not "
+                f"fit the timing: {line.strip()[:200]}")
+            incident.confidence = 0.5
 
     @staticmethod
     def _conclude(incident: Incident, action: dict[str, Any]) -> None:
@@ -283,6 +304,7 @@ class Investigator:
             incident.confidence = max(0.0, min(1.0, float(action.get("confidence", 0.5))))
         except (TypeError, ValueError):
             incident.confidence = 0.5
+        incident.suspect = str(action.get("suspect", "") or "").strip()
         sev = str(action.get("severity", "medium")).lower()
         incident.severity = sev if sev in ("low", "medium", "high", "critical") else "medium"
         incident.recommended_actions = [str(a) for a in action.get("recommended_actions", [])][:6]

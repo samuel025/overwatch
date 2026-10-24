@@ -164,7 +164,7 @@ def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direc
     if c := roles.get("changes"):
         evidence.append({
             "name": f"{name}_changes", "label": f"Changes in the last 30 minutes ({c['table']})",
-            "source": "zetaris" if zet else name,
+            "suspects": True, "source": "zetaris" if zet else name,
             "query": f"SELECT * FROM {qual(c['table'])} WHERE {c['ts']} > {since(30, 'minutes')} "
                      f"ORDER BY {c['ts']} DESC LIMIT 15",
         })

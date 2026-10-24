@@ -70,6 +70,7 @@ class Incident:
     cited: list[dict[str, Any]] = field(default_factory=list)  # evidence quotes the conclusion relies on
     first_guess_verdict: dict[str, Any] = field(default_factory=dict)  # agree/disagree with the first guess
     grounding: dict[str, Any] = field(default_factory=dict)  # mechanical check of the conclusion against data
+    suspect: str = ""  # the suspect event (S1, S2...) the conclusion rests on, or "none"
 
     @property
     def services(self) -> list[str]:
