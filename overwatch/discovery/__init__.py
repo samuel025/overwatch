@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.engine import make_url
+
 import yaml
 
 from .. import knowledge
@@ -37,6 +39,30 @@ def match_service(name: str, known: set[str]) -> str | None:
     mine = words(name)
     hits = [k for k in known if words(k) and len(mine) > len(words(k)) and mine[-len(words(k)):] == words(k)]
     return hits[0] if len(hits) == 1 else None
+
+
+def _database_service(url: str, services: dict[str, Any]) -> str | None:
+    """The discovered service a database URL points at: the one publishing that port, or named like the host."""
+    try:
+        u = make_url(url)
+    except Exception:
+        return None
+    for name, facts in services.items():
+        if not isinstance(facts, dict):
+            continue
+        if name == u.host or any(p.get("PublicPort") == u.port for p in facts.get("ports") or []):
+            return name
+    return None
+
+
+def _connections_check(name: str, source: str, service: str) -> dict[str, Any]:
+    """Early warning: a database whose connection slots are nearly used up still answers, until the app is refused."""
+    return {
+        "name": f"{name}_connections_used_pct", "source": source, "service": service, "threshold": 85,
+        "comparison": ">", "severity": "high",
+        "query": "SELECT round(100.0 * count(*) / current_setting('max_connections')::int, 1) AS value FROM pg_stat_activity",
+        "description": f"share of {name}'s connection slots in use (the app is refused when they run out)",
+    }
 
 
 def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
@@ -147,12 +173,16 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
                     direct = discover_sql(name, url, target="direct")  # the live-session evidence only exists there
                     s["evidence"] = s["evidence"] + [{**e, "source": f"{name}_live"} for e in direct["evidence"]
                                                      if "pg_stat_activity" in e.get("query", "")]
+                    plan["checks"].append(_connections_check(
+                        name, f"{name}_live", _database_service(url, plan["services"]) or name))
                     s["catalog"] += (f"\n  Live Postgres internals are NOT in Zetaris. Query source {name}_live (PostgreSQL SQL) for: "
                                      "pg_stat_activity (who is connected, what they run and wait on), pg_locks, pg_indexes, "
                                      "pg_stat_user_tables (seq_scan vs idx_scan), pg_stat_statements (if enabled).")
             else:
                 plan["sources"][name] = {"type": "postgres" if s["dialect"] == "postgresql" else "sql",
                                          "url": sqlalchemy_url(url)}
+                if s["dialect"] == "postgresql":
+                    plan["checks"].append(_connections_check(name, name, _database_service(url, plan["services"]) or name))
             plan["catalog"].append(s["catalog"])
             plan["checks"] += s["checks"]
             plan["evidence"] += s["evidence"]

@@ -304,6 +304,18 @@ Overwatch does not plug into your services. It reads the data they already produ
 | Container/host metrics (CPU, memory, restarts, OOM kills, running state) | find leaks, crashes, saturation; know if a service is alive | Kubernetes/cAdvisor, Docker |
 | Past incident tickets | give the Historian something to remember | Jira export |
 
+### Problems it detects with no checks written
+
+Connect Docker, Prometheus and a database and discovery adds these checks for you:
+
+| Problem | How it is seen |
+|---|---|
+| A service stopped, killed or paused | the container is not running (or stops answering its health URL) |
+| A service answering errors or slowly | error rate and latency from Prometheus or a metrics table, against its own recent baseline |
+| A silent service | a heartbeat that stops arriving |
+| **Database connections nearly used up** | Postgres: share of `max_connections` in use, warns above 85% (`<db>_connections_used_pct`) before the app is refused |
+| Slow queries, locks, a dropped index | not triggers themselves: Overwatch finds them in `pg_stat_activity`, `pg_locks` and `pg_stat_statements` once a symptom opens an incident |
+
 The more of this you connect, the better the investigations. You do not need a logs table or a metrics table: Docker, Kubernetes and Loki are read directly from their own APIs.
 
 ### Connecting: three ways

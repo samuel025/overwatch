@@ -17,6 +17,7 @@ from typing import Any
 
 from sqlalchemy.engine import make_url
 
+from .sources.base import SourceError
 from .sources.zetaris import ZetarisSource
 
 JDBC_DRIVERS = {"postgresql": "org.postgresql.Driver", "mysql": "com.mysql.cj.jdbc.Driver",
@@ -64,6 +65,9 @@ def registration_statements(name: str, sqlalchemy_url: str, description: str = "
     ]
 
 
+REGISTER_SECONDS = 40  # per statement; registering reads the database's schema, so a hung database shows up here
+
+
 def register(databases: dict[str, str], zetaris: dict[str, Any] | None = None) -> list[str]:
     """Register every database with the deployment's Zetaris. Returns what was run."""
     cfg = zetaris or zetaris_env()
@@ -72,8 +76,14 @@ def register(databases: dict[str, str], zetaris: dict[str, Any] | None = None) -
     src = ZetarisSource("zetaris", cfg)
     try:
         done: list[str] = []
+        failed: list[str] = []
         for name, url in databases.items():
-            done += src.admin(registration_statements(name, url))
+            try:  # a database that is down or paused must not keep the others (or startup) waiting for ever
+                done += src.admin(registration_statements(name, url), timeout=REGISTER_SECONDS)
+            except SourceError as e:
+                failed.append(f"{name}: {e}")
+        if failed:
+            raise RuntimeError("; ".join(failed))
         return done
     finally:
         src.close()

@@ -15,6 +15,7 @@ import hashlib
 import math
 import os
 import re
+import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -75,6 +76,8 @@ class ZetarisSource(DataSource):
             if not cfg.get(key):
                 raise SourceError(f"source '{name}' needs '{key}' (see the Zetaris client setup)")
         self._conn: Any = None
+        # A paused or hung data source accepts the connection and never answers; no query may wait longer than this.
+        self.query_timeout = float(cfg.get("timeout_seconds", 20))
         raw_rest = cfg.get("rest") or {}  # {"prometheus": url, "loki": url, "loki_headers": {...}}
         self.rest: dict[str, Any] = {k: reachable(v) if k in ("prometheus", "loki") and v else v for k, v in raw_rest.items()}
         self._rest_ready: set[str] = set()
@@ -98,24 +101,44 @@ class ZetarisSource(DataSource):
             raise SourceError(f"could not connect to Zetaris: {str(e).splitlines()[0]}") from e
         return self._conn
 
-    def _run(self, sql: str, limit: int | None) -> list[dict[str, Any]]:
+    def _run(self, sql: str, limit: int | None, timeout: float | None = -1) -> list[dict[str, Any]]:
+        """Run one statement with a wall-clock deadline (`timeout=None` for registration DDL, which may be slow)."""
+        deadline = self.query_timeout if timeout == -1 else timeout
         conn = self._connect()
-        cur = conn.cursor()
-        try:
-            cur.execute(sql)
-            if cur.description is None:
-                return []
-            cols = [d[0] for d in cur.description]
-            rows = cur.fetchmany(limit) if limit else cur.fetchall()
-        except Exception as e:
-            self._conn = None  # a broken connection should not poison the next query
-            raise SourceError(str(e).splitlines()[0]) from e
-        finally:
+        box: dict[str, Any] = {}
+
+        def work() -> None:
+            cur = conn.cursor()
+            box["cur"] = cur
             try:
-                cur.close()
-            except Exception:
-                pass
-        return [{c: _jsonable(v) for c, v in zip(cols, r)} for r in rows]
+                cur.execute(sql)
+                if cur.description is None:
+                    box["rows"], box["cols"] = [], []
+                    return
+                box["cols"] = [d[0] for d in cur.description]
+                box["rows"] = cur.fetchmany(limit) if limit else cur.fetchall()
+            except BaseException as e:  # reported to the caller below
+                box["error"] = e
+            finally:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+
+        worker = threading.Thread(target=work, name="zetaris-query", daemon=True)
+        worker.start()
+        worker.join(deadline)
+        if worker.is_alive():
+            self._conn = None  # the stuck statement keeps the old connection; the next query gets a fresh one
+            prep = getattr(box.get("cur"), "_prep", None)
+            if prep is not None:
+                threading.Thread(target=lambda: prep.cancel(), daemon=True).start()  # best effort
+            raise SourceError(f"the query did not answer within {deadline:.0f} s; the data source behind it may be "
+                              "paused, hung or unreachable")
+        if "error" in box:
+            self._conn = None  # a broken connection should not poison the next query
+            raise SourceError(str(box["error"]).splitlines()[0]) from box["error"]
+        return [{c: _jsonable(v) for c, v in zip(box["cols"], r)} for r in box["rows"]]
 
     def _plain(self, sql: str) -> None:
         """Run a DDL statement without a prepared statement: a `?` in a URL is not a placeholder."""
@@ -199,17 +222,17 @@ class ZetarisSource(DataSource):
         sql = stripped if _META.match(stripped) and ";" not in stripped else check_read_only(q)
         return self._run(sql, self.max_rows)
 
-    def admin(self, statements: list[str]) -> list[str]:
+    def admin(self, statements: list[str], timeout: float | None = None) -> list[str]:
         """Run registration statements (CREATE DATASOURCE ...), one at a time. Used by Overwatch's own setup
         flow with the deployment's admin account; never reachable by agents (they only call query())."""
         done = []
         for s in statements:
             if s.upper().startswith("CREATE DATASOURCE "):  # re-running setup must replace, not fail "already exists"
                 try:
-                    self._run("DROP DATASOURCE " + s.split()[2], None)
+                    self._run("DROP DATASOURCE " + s.split()[2], None, timeout)
                 except SourceError:
                     pass
-            self._run(s, None)
+            self._run(s, None, timeout)
             done.append(s.split("(")[0].strip()[:80])
         return done
 

@@ -175,3 +175,54 @@ def test_internal_sources_are_not_offered_to_the_investigator():
     assert "prom" in inv.hidden
     assert inv._run_query({"source": "prom", "query": "up"}).error.startswith("unknown source 'prom'")
     assert not inv._run_query({"source": "prom", "query": "up", "_pack": True}).error.startswith("unknown source")
+
+
+def test_a_hung_data_source_cannot_hold_a_query_forever(monkeypatch):
+    import threading
+    import time
+    import types
+
+    release = threading.Event()
+
+    class Cursor:
+        description = None
+
+        def execute(self, sql):
+            release.wait(5)  # a paused database: connects, never answers
+
+        def close(self):
+            pass
+
+    class Conn:
+        def cursor(self):
+            return Cursor()
+
+    monkeypatch.setitem(sys.modules, "jaydebeapi", types.SimpleNamespace(connect=lambda *a, **k: Conn()))
+    src = ZetarisSource("z", {"jdbc_url": "jdbc:x", "driver_class": "x", "timeout_seconds": 0.3})
+    started = time.monotonic()
+    with pytest.raises(SourceError, match="did not answer within"):
+        src.query("SELECT 1")
+    release.set()
+    assert time.monotonic() - started < 2
+    assert src._conn is None  # the next query opens a fresh connection
+
+
+def test_postgres_gets_a_connection_saturation_check_on_its_own_service(monkeypatch):
+    from overwatch import discovery
+
+    def fake_sql(name, url, max_tables=40, target="direct"):
+        return {"name": name, "dialect": "postgresql", "tables": [], "catalog": "", "checks": [], "notes": [],
+                "evidence": [{"name": "a", "label": "l", "source": name, "query": "SELECT 1 FROM pg_stat_activity"}],
+                "services": [], "logs": None, "log_hits": {}}
+
+    monkeypatch.setattr(discovery, "discover_sql", fake_sql)
+    monkeypatch.setattr(discovery, "discover_docker", lambda *a, **k: {
+        "project": "shop", "service_label": "x", "projects": ["shop"], "topology": {}, "checks": [], "runtime_facts": "",
+        "notes": [], "env_hits": {}, "log_hits": {}, "internal": [],
+        "services": {"postgres": {"databases": True, "ports": [{"PublicPort": 5433}]}, "api": {"ports": []}}})
+    for zet in (True, False):
+        plan = discovery.discover({"project": "shop"}, "", {"main": "postgresql://u:p@localhost:5433/db"}, zetaris=zet)
+        check = next(c for c in plan["checks"] if c["name"] == "main_connections_used_pct")
+        assert check["service"] == "postgres" and check["threshold"] == 85
+        assert check["source"] == ("main_live" if zet else "main")
+        assert "max_connections" in check["query"]
