@@ -148,9 +148,9 @@ code { font: 11.5px var(--mono); }
 /* ---------- system map ---------- */
 .map-card { padding-bottom: 12px; }
 /* The system map: a pannable canvas of draggable service cards (React Flow). */
-.map-flow { height: 440px; border-radius: 10px; overflow: hidden; background: var(--panel); border: 1px solid var(--line-soft); }
+.map-flow { height: 440px; border-radius: 10px; overflow: hidden; background: var(--bg); border: 1px solid var(--line-soft); }
 .map-flow-preview { height: 280px; }
-.map-flow .react-flow { --xy-background-color: var(--panel); background: var(--panel); font-family: var(--sans); }
+.map-flow .react-flow { --xy-background-color: var(--bg); background: var(--bg); font-family: var(--sans); }
 .map-flow .react-flow__node { cursor: grab; }
 .map-flow .react-flow__node.dragging { cursor: grabbing; }
 .map-flow .react-flow__edge-path { transition: stroke 250ms ease; }
@@ -526,3 +526,6 @@ a.btn { text-decoration: none; color: var(--text); display: inline-block; }
 
 .grounding-claims { margin-top: 6px; color: var(--text); }
 .grounding-claims ul { margin: 4px 0 0; padding-left: 18px; }
+
+/* The facts Overwatch worked out about a service: two lines, the rest on hover, so the box to fill stays wide. */
+.fact-line { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 360px; }

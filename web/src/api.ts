@@ -48,6 +48,7 @@ export interface Plan {
   docker: { project?: string; service_label?: string };
   docker_projects?: string[];
   services: Record<string, Record<string, string>>;
+  service_facts?: Record<string, string>; // what Overwatch worked out about each service (calls, callers, where it runs)
   runtime_facts: string;
   sources: Record<string, { type: string; url: string }>;
   catalog: string;
@@ -100,7 +101,7 @@ export interface SettingsCheck {
 export interface Settings {
   config_path: string;
   system: { name: string; description: string };
-  services: { name: string; what: string; normal: string; runs_on: string }[];
+  services: { name: string; what: string; normal: string; runs_on: string; facts?: string }[];
   externals: External[];
   service_names: string[];
   checks: SettingsCheck[];

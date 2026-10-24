@@ -11,7 +11,7 @@ import re
 import time
 from typing import Any, Callable
 
-from .. import grounding
+from .. import grounding, knowledge
 from ..config import Config
 from ..llm import LLM, LLMError
 from ..models import Evidence, Incident
@@ -120,17 +120,20 @@ class Investigator:
     def known_text(self) -> str:
         """Everything Overwatch tells the model about the system (also the reference for grounding)."""
         cfg = self.cfg
-        parts = [cfg.system_description, cfg.catalog, cfg.runtime_facts,
-                 json.dumps(cfg.services), json.dumps(cfg.topology), " ".join(self.sources)]
+        parts = [knowledge.system_description(cfg.system_description) if knowledge.is_placeholder(cfg.system_description)
+                 else cfg.system_description, cfg.catalog, cfg.runtime_facts,
+                 "\n".join(knowledge.describe_services(cfg.services, cfg.topology, cfg.checks)),
+                 json.dumps(cfg.topology), " ".join(self.sources)]
         return " ".join(parts)
 
     def _context(self, incident: Incident, timeline: list[str] | None = None) -> list[str]:
         cfg = self.cfg
         context = [
-            f"System: {cfg.system_name}. {cfg.system_description}",
-            *(["Service knowledge (from the team):\n" + "\n".join(
-                f"- {name}: " + "; ".join(f"{k}: {v}" for k, v in facts.items())
-                for name, facts in cfg.services.items())] if cfg.services else []),
+            f"System: {cfg.system_name}. "
+            + (knowledge.system_description(cfg.system_description) if knowledge.is_placeholder(cfg.system_description)
+               else cfg.system_description),
+            *(["Service knowledge (the team's own words where they wrote any; otherwise what Overwatch found):\n"
+               + "\n".join(knowledge.describe_services(cfg.services, cfg.topology, cfg.checks))] if cfg.services else []),
             *([f"Runtime facts:\n{cfg.runtime_facts.strip()}"] if cfg.runtime_facts else []),
             f"Data sources:\n{_describe_sources(self.sources, self.hidden)}",
             f"Catalog (what you can query):\n{cfg.catalog}",

@@ -24,6 +24,7 @@ import type { BlastRadius } from "../types";
 
 const W = 172; // node card
 const H = 70;
+const FIT = { padding: 0.38, maxZoom: 0.95 }; // opens a little zoomed out, with room around the cards
 const COL_GAP = 96;
 const ROW_GAP = 28;
 
@@ -131,7 +132,7 @@ function ResetButton({ onReset }: { onReset: () => void }) {
       title="Put every service back in its automatic place"
       onClick={() => {
         onReset();
-        window.requestAnimationFrame(() => fitView({ padding: 0.2, duration: 300 }));
+        window.requestAnimationFrame(() => fitView({ ...FIT, duration: 300 }));
       }}
     >
       Reset layout
@@ -221,7 +222,7 @@ function Flow({ topology, blast, preview }: { topology: Record<string, string[]>
         onNodeDragStop={onDragStop}
         colorMode="dark"
         fitView
-        fitViewOptions={{ padding: 0.2, maxZoom: 1.1 }}
+        fitViewOptions={FIT}
         minZoom={0.3}
         maxZoom={1.8}
         nodesConnectable={false}
@@ -232,7 +233,7 @@ function Flow({ topology, blast, preview }: { topology: Record<string, string[]>
         preventScrolling={false}
         proOptions={{ hideAttribution: true }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={20} size={1.4} color="#2a3447" />
+        <Background variant={BackgroundVariant.Dots} gap={20} size={1.4} color="#252d3d" />
         <Controls showInteractive={false} position="bottom-left" />
         {!preview && names.length > 8 && (
           <MiniMap

@@ -236,7 +236,7 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
               <tbody>
                 {Object.entries(plan.services).map(([name, facts]) => (
                   <tr key={name}>
-                    <td className="mono">{name}{facts.runs_on && <span className="field-hint">{facts.runs_on}</span>}</td>
+                    <td className="mono">{name}{(plan.service_facts?.[name] || facts.runs_on) && <span className="field-hint fact-line" title={`Worked out by Overwatch, not written by anyone: ${plan.service_facts?.[name] || facts.runs_on}`}>{plan.service_facts?.[name] || facts.runs_on}</span>}</td>
                     <td><input aria-label={`${name}: what it does`} className={clsx(todo(facts.what ?? "") && "todo")} value={facts.what ?? ""}
                       onChange={(e) => updatePlan((p) => { p.services[name] = { ...p.services[name], what: e.target.value }; })} /></td>
                   </tr>

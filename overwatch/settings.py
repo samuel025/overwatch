@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from . import knowledge
 from .config import _ENV_REF, load_dotenv
 
 _WHOLE_REF = re.compile(r"^\$\{([A-Z0-9_]+)(?::-([^}]*))?\}$")
@@ -102,10 +103,12 @@ def read(config_path: str | Path) -> dict[str, Any]:
             })
         else:
             internal.append({"name": name, "what": str(facts.get("what", "")), "normal": str(facts.get("normal", "")),
-                             "runs_on": str(facts.get("runs_on", ""))})
+                             "runs_on": str(facts.get("runs_on", "")),
+                             "facts": knowledge.facts_for(name, services, topology, checks)})
     for name in sorted({d for deps in topology.values() for d in (deps or [])} | set(topology)):
         if name not in services:
-            internal.append({"name": name, "what": "", "normal": "", "runs_on": ""})
+            internal.append({"name": name, "what": "", "normal": "", "runs_on": "",
+                             "facts": knowledge.facts_for(name, services, topology, checks)})
 
     llm = raw.get("llm") or {}
     watch = raw.get("watch") or {}

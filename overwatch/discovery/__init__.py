@@ -16,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from .. import knowledge
 from ..datalayer import source_config
 from .docker import discover_docker
 from .kubernetes import discover_kubernetes
@@ -179,6 +180,8 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
     plan["checks"] = unique
     plan["evidence"] = [{**e, "enabled": True} for e in plan["evidence"]]
     plan["catalog"] = "\n".join(plan["catalog"])
+    plan["service_facts"] = {n: knowledge.facts_for(n, plan["services"], plan["topology"], plan["checks"])
+                             for n in plan["services"]}
     services = sorted(plan["services"])
     plan["system"]["description"] = (
         f"{len(services)} services: {', '.join(services)}. " if services else ""
@@ -319,7 +322,7 @@ def render(plan: dict[str, Any], llm: dict[str, str] | None = None) -> tuple[str
 
     for name, url in (plan.get("databases") or {}).items():  # kept so the data layer can re-register them
         env[_env_name(name)] = url
-    llm = llm or {}
+    llm = {k: v.strip() if isinstance(v, str) else v for k, v in (llm or {}).items()}  # a typed space must not reach .env
     if llm.get("api_key"):
         env["LLM_API_KEY"] = llm["api_key"]
     if llm.get("base_url"):

@@ -188,3 +188,13 @@ def test_prometheus_metrics_are_attached_to_the_compose_service(monkeypatch):
     assert "shop_api" not in plan["services"]  # not a second service on the map
     assert any("Prometheus calls 'shop_api' what Docker calls 'api'" in n for n in plan["notes"])
     assert 'job="shop_api"' in next(c["query"] for c in plan["checks"] if c["name"] == "shop_api_up")  # PromQL untouched
+
+
+def test_what_setup_saves_for_the_ai_provider_is_trimmed():
+    from overwatch.discovery import render
+
+    plan = {"system": {"name": "s", "description": "d"}, "docker": {}, "services": {}, "runtime_facts": "", "sources": {},
+            "catalog": "", "topology": {}, "checks": [], "evidence": [], "externals": [], "databases": {}, "log_source": None}
+    _, env = render(plan, {"base_url": " https://x/v1 ", "api_key": " nvapi-1 ", "model": " m ", "triage_model": " fast "})
+    assert env["LLM_BASE_URL"] == "https://x/v1" and env["LLM_API_KEY"] == "nvapi-1"
+    assert env["OVERWATCH_MODEL"] == "m" and env["OVERWATCH_TRIAGE_MODEL"] == "fast"

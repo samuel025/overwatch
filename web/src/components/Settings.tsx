@@ -102,7 +102,7 @@ export function Settings({ onClose }: { onClose: () => void }) {
                 <tbody>
                   {draft.services.map((s, i) => (
                     <tr key={s.name}>
-                      <td className="mono">{s.name}{s.runs_on && <span className="field-hint">{s.runs_on}</span>}</td>
+                      <td className="mono">{s.name}{(s.facts || s.runs_on) && <span className="field-hint fact-line" title={`Worked out by Overwatch, not written by anyone: ${s.facts || s.runs_on}`}>{s.facts || s.runs_on}</span>}</td>
                       <td><input aria-label={`${s.name}: what it does`} className={clsx(s.what.startsWith("TODO") && "todo")} value={s.what} placeholder="e.g. takes orders, calls payments"
                         onChange={(e) => update((d) => { d.services[i].what = e.target.value; })} /></td>
                       <td><input aria-label={`${s.name}: normal behaviour`} value={s.normal} placeholder="e.g. p95 under 100 ms"
