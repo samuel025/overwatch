@@ -57,13 +57,36 @@ def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direc
         if dialect == "postgresql":
             for r in conn.execute(text("SELECT relname, reltuples::bigint FROM pg_class WHERE relkind = 'r'")):
                 rows_estimate[r[0]] = int(r[1])
-            pg_health["pg_stat_statements"] = bool(conn.execute(
-                text("SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements'")).scalar())
+            # pg_stat_statements: "ready", "not_created" (extension not created in this database) or "not_loaded"
+            # (the server was not started with it in shared_preload_libraries; querying it then raises an error)
+            try:  # ask the view itself: reading the server setting needs a privilege the user may not have
+                conn.execute(text("SELECT 1 FROM pg_stat_statements LIMIT 1"))
+                state = "ready"
+            except Exception as e:
+                conn.rollback()
+                state = "not_loaded" if "shared_preload_libraries" in str(e) else "not_created"
+                if state == "not_created":  # a missing view looks the same either way; the setting says which, if readable
+                    try:
+                        loaded = "pg_stat_statements" in str(conn.execute(text("SHOW shared_preload_libraries")).scalar() or "")
+                        state = "not_created" if loaded else "not_loaded"
+                    except Exception:
+                        conn.rollback()
+                        state = "unknown"
+            pg_health["pg_stat_statements"] = state == "ready"
+            pg_health["statements_state"] = state
             try:
                 conn.execute(text("SELECT count(*) FROM pg_stat_activity"))
                 pg_health["pg_stat_activity"] = True
             except Exception:
                 pg_health["pg_stat_activity"] = False
+                conn.rollback()
+            try:  # other users' sessions show state and query only to a superuser or a pg_read_all_stats member
+                pg_health["activity_details"] = bool(conn.execute(text(
+                    "SELECT rolsuper OR pg_has_role(current_user, 'pg_read_all_stats', 'member') "
+                    "FROM pg_roles WHERE rolname = current_user")).scalar())
+            except Exception:
+                pg_health["activity_details"] = False
+                conn.rollback()
 
         roles: dict[str, dict[str, Any]] = {}
         for t in tables:
@@ -187,15 +210,25 @@ def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direc
         })
 
     notes = []
-    if pg and not pg_health.get("pg_stat_statements"):
-        notes.append(f"{name}: enable the pg_stat_statements extension to let Overwatch see slow queries.")
-    if pg and not pg_health.get("pg_stat_activity"):
-        notes.append(f"{name}: grant pg_read_all_stats to Overwatch's user to see sessions and locks.")
+    if pg:
+        if not pg_health.get("activity_details"):
+            notes.append(f"{name}: Overwatch's database user cannot see other sessions' queries. Run "
+                         "`GRANT pg_read_all_stats TO <that user>;` (or connect as a superuser). Until then the "
+                         "slow-query check is off and the sessions evidence is incomplete.")
+        state = pg_health.get("statements_state")
+        if state == "not_loaded":
+            notes.append(f"{name}: to let Overwatch see which queries are slow, start Postgres with "
+                         "`-c shared_preload_libraries=pg_stat_statements` (restart needed), then run "
+                         "`CREATE EXTENSION pg_stat_statements;` in this database.")
+        elif state in ("not_created", "unknown"):
+            notes.append(f"{name}: run `CREATE EXTENSION pg_stat_statements;` in this database so Overwatch can see slow queries."
+                         + (" If that says the library is not loaded, first start Postgres with "
+                            "`-c shared_preload_libraries=pg_stat_statements` and restart it." if state == "unknown" else ""))
     return {
         "name": name, "dialect": dialect, "tables": [t["name"] for t in tables], "catalog": "\n".join(lines),
         "roles": {k: v.get("table") for k, v in roles.items()}, "checks": checks, "evidence": evidence, "notes": notes,
         "services": roles.get("metrics", {}).get("services", []),
-        "pg_activity": bool(pg and pg_health.get("pg_stat_activity")),
+        "pg_activity": bool(pg and pg_health.get("pg_stat_activity") and pg_health.get("activity_details")),
         "logs": {**roles["logs"], "table": qual(roles["logs"]["table"])} if roles.get("logs") else None,
         "log_hits": log_hits,
     }

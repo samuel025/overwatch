@@ -316,7 +316,7 @@ Overwatch does not plug into your services. It reads the data they already produ
 | A slow service or endpoint | p95 latency above its limit or above its own baseline |
 | A silent service | a heartbeat that stops arriving |
 | A database connection pool nearly full | Postgres connections in use above 85% of `max_connections` (`<db>_connections_used_pct`), before the app is refused |
-| **A slow or stuck database query** | Postgres: the longest query running right now, over 5 s (`<db>_longest_query_seconds`). It clears the moment the query ends. Not `pg_stat_statements`, which is cumulative and would stay red after the fix |
+| **A slow or stuck database query** | Postgres: the longest query running right now, over 5 s (`<db>_longest_query_seconds`; needs `pg_read_all_stats`, see [Postgres setup](#postgres-setup-what-to-switch-on)). It clears the moment the query ends. Not `pg_stat_statements`, which is cumulative and would stay red after the fix |
 | A database down or unreachable | its container check fails and its callers' errors rise |
 | Memory leak, restart loop, out-of-memory kills | repeated container stops and restarts |
 | Traffic surge | request rate far above baseline |
@@ -339,6 +339,30 @@ Overwatch does not plug into your services. It reads the data they already produ
 **What is verified.** The 18 injectable faults in the demo shop are all caught by the Watcher (see [section 11](#11-the-demo-system-and-its-19-faults) and `eval/fault-verification.md`; `service_down` was checked in live runs). Slow query, bad deploy, lock contention and a wrong timeout were also diagnosed correctly and graded by hand on the demo shop. On a second, real Docker Compose app (a URL shortener) these were run live: a killed Redis, a killed and a paused Postgres, slow queries, and connection exhaustion. Kubernetes and Loki are implemented but have not yet been run against a real cluster. There is no accuracy benchmark across all faults yet.
 
 The more of this you connect, the better the investigations. You do not need a logs table or a metrics table: Docker, Kubernetes and Loki are read directly from their own APIs.
+
+### Postgres setup (what to switch on)
+
+Connecting a Postgres database needs nothing special to start. Some features need a setting or a privilege; the setup wizard tests each one and tells you the exact fix for any that is missing.
+
+| Feature | What it needs | Without it |
+|---|---|---|
+| Table catalog, changes, logs, metrics tables | the user can `SELECT` on those tables | those tables are not seen |
+| **Connection saturation warning** (`<db>_connections_used_pct`) | nothing extra (counts sessions) | works |
+| **Slow or stuck query warning** (`<db>_longest_query_seconds`) and the "who is connected, what are they running" evidence | the user is a superuser, or a member of `pg_read_all_stats`: `GRANT pg_read_all_stats TO overwatch;` | other users' sessions show no query or state, so the check is switched off |
+| Locks (`pg_locks`), indexes (`pg_indexes`), scan statistics (`pg_stat_user_tables`) | nothing extra | works |
+| **Which queries are slow, and how slow** (`pg_stat_statements`) | 1. start Postgres with `-c shared_preload_libraries=pg_stat_statements` (Docker Compose: `command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]`; managed Postgres: enable it in the parameter group), 2. restart, 3. `CREATE EXTENSION pg_stat_statements;` in the database | the investigation can still see running queries, but not the history of slow ones |
+
+A suitable account for Overwatch, read-only apart from statistics:
+
+```sql
+CREATE ROLE overwatch LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE yourdb TO overwatch;
+GRANT USAGE ON SCHEMA public TO overwatch;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO overwatch;
+GRANT pg_read_all_stats TO overwatch;
+```
+
+Nothing else needs changing: no logging settings, no `track_*` settings, no extensions other than `pg_stat_statements`, and Overwatch never writes to your database.
 
 ### Connecting: three ways
 
