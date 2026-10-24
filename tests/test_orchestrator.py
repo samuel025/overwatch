@@ -583,3 +583,20 @@ def test_an_incident_shows_it_is_recovering_and_stops_if_the_problem_returns(wor
     ow.check_once()
     assert inc.healthy_since is None  # relapse: the confirmation starts over
     ow.stop()
+
+
+def test_who_is_at_risk_shows_while_the_investigation_is_still_running(world):
+    """Stopping a database must mark its callers at risk straight away, not only when the diagnosis arrives."""
+    make, set_value = world
+    ow = make()
+    ow.cfg.topology = {"a": ["b"], "b": []}  # a calls b
+    ow.investigator.llm.gate.clear()  # hold the investigation open
+    set_value("b", 50)
+    inc = ow.check_once()
+    assert wait_for(lambda: inc.blast_radius.get("at_risk") == ["a"])
+    assert inc.status == "investigating"  # no diagnosis yet
+    assert inc.blast_radius["origin"] == "b" and inc.blast_radius["affected"] == ["b"]
+    ow.investigator.llm.gate.set()
+    assert wait_for(lambda: inc.status == "awaiting_approval")
+    assert inc.blast_radius["at_risk"] == ["a"]  # and it is still right once the diagnosis is in
+    ow.stop()

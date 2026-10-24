@@ -20,7 +20,7 @@ from .agents import Historian, Investigator, Responder, Watcher
 from .config import Config, EvidenceConfig
 from .events import EventBus
 from .telemetry import DockerTelemetry
-from .impact import check_starts, incident_start, measure, spread, timestamp_literal
+from .impact import check_starts, deepest_failing, incident_start, measure, spread, timestamp_literal
 from .listeners import LISTENER_TYPES
 from .llm import LLM
 from .memory import build_memory
@@ -433,6 +433,7 @@ class Overwatch:
         self.events.emit("agent.working", agent="evidence", incident=incident.id)
         incident.pack = self.gather_evidence(incident)
         timeline = self.build_timeline(incident)
+        self.refresh_spread(incident)  # the map shows who is at risk now, not only when the diagnosis arrives
         self._annotate(incident.pack, incident.started_at)
         self._save(incident)
         self.events.emit("agent.working", agent="historian", incident=incident.id)
@@ -446,6 +447,7 @@ class Overwatch:
                 on_update(inc)
 
         if self.investigator.triage(incident, timeline):
+            self.refresh_spread(incident)  # the first guess may name the origin
             self._save(incident)
         self.investigator.investigate(incident, on_step=step, timeline=timeline)
         incident.reasoning.append(f"Investigation took {time.monotonic() - started:.1f}s")
@@ -473,18 +475,38 @@ class Overwatch:
             self.events.emit("investigator.failed", incident=incident.id, error=str(e))
             self.events.emit("incident.updated", incident=incident.to_dict())
 
+    def _spread_for(self, incident: Incident) -> dict[str, Any]:
+        """Who is affected and at risk, from the topology. The origin is, in order of trust: what the Investigator
+        concluded, the fast first guess, or the failing service that depends on no other failing service."""
+        nodes = set(self.cfg.topology) | {d for deps in self.cfg.topology.values() for d in deps}
+        failing = {a.service for a in incident.anomalies if a.service in nodes} if nodes else set(incident.services)
+        origin = incident.origin_service or (incident.hypothesis or {}).get("origin_service")
+        if origin and nodes and origin not in nodes:
+            origin = next((n for n in nodes if n in origin or origin in n), None)  # "payments-b" -> "payments"
+        if not origin:
+            roots = deepest_failing(self.cfg.topology, failing)
+            origin = next(iter(roots)) if len(roots) == 1 else None
+        return spread(self.cfg.topology, origin, failing)
+
+    def refresh_spread(self, incident: Incident) -> None:
+        """Cheap and immediate (no queries): show who is at risk as soon as the incident opens, and keep it current as
+        checks join and the origin becomes clearer. The full figures (impact numbers) follow in update_blast_radius."""
+        detected = _ts(incident.opened_at)
+        started = incident_start(incident.anomalies, self.watcher.history, detected)
+        incident.blast_radius = {
+            "impact": [], "measured_at": None, **incident.blast_radius, **self._spread_for(incident),
+            "started_at": started, "detected_at": detected, "time_to_detect_s": round(detected - started, 1),
+            "duration_s": round(time.time() - started, 1), "recovered_at": None,
+        }
+        self.events.emit("blast_radius.updated", incident=incident.id, blast_radius=incident.blast_radius)
+
     def update_blast_radius(self, incident: Incident) -> None:
         """Deterministic impact: start time from check history, spread from topology, cost from queries."""
         detected = _ts(incident.opened_at)
         started = incident_start(incident.anomalies, self.watcher.history, detected)
         end = _ts(incident.recovered_at) if incident.recovered_at else time.time()
-        origin = incident.origin_service
-        nodes = set(self.cfg.topology) | {d for deps in self.cfg.topology.values() for d in deps}
-        if origin and nodes and origin not in nodes:
-            origin = next((n for n in nodes if n in origin or origin in n), None)  # "payments-b" -> "payments"
-        failing = {a.service for a in incident.anomalies if a.service in nodes} if nodes else set(incident.services)
         incident.blast_radius = {
-            **spread(self.cfg.topology, origin, failing),
+            **self._spread_for(incident),
             "started_at": started,
             "detected_at": detected,
             "time_to_detect_s": round(detected - started, 1),
@@ -666,6 +688,7 @@ class Overwatch:
             for a in anomalies:
                 self.last_opened[a.check] = time.time()
             incident.reasoning.append("Also firing, merged into this incident: " + ", ".join(a.check for a in anomalies))
+        self.refresh_spread(incident)
         self._save(incident)
         self.events.emit("incident.merged", incident=incident.id, checks=[a.check for a in anomalies])
         self.events.emit("incident.updated", incident=incident.to_dict())

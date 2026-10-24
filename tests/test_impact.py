@@ -31,3 +31,24 @@ def test_incident_start_walks_back_the_unbroken_bad_run():
     assert incident_start([a], history, detected_at=145) == 120
     silent = Anomaly("lat2", "gw", None, 0, "no_data", "")
     assert incident_start([silent], {"lat2": deque([(1, 5.0), (2, None), (3, None)])}, detected_at=4) == 2
+
+
+def test_the_origin_is_the_failing_service_that_depends_on_no_other_failing_one():
+    from overwatch.impact import deepest_failing
+
+    topology = {"api": ["postgres", "redis"], "prometheus": ["api"], "postgres": [], "redis": []}
+    assert deepest_failing(topology, {"postgres"}) == {"postgres"}
+    assert deepest_failing(topology, {"api", "postgres"}) == {"postgres"}  # api fails because postgres does
+    assert deepest_failing(topology, {"postgres", "redis"}) == {"postgres", "redis"}  # two independent roots
+
+
+def test_everything_that_calls_a_failing_service_is_at_risk_even_without_a_named_origin():
+    from overwatch.impact import spread
+
+    topology = {"api": ["postgres", "redis"], "prometheus": ["api"], "postgres": [], "redis": []}
+    s = spread(topology, None, {"postgres"})
+    assert s["at_risk"] == ["api", "prometheus"] and s["affected"] == ["postgres"]
+    assert {"from": "api", "to": "postgres"} in s["edges"] and {"from": "prometheus", "to": "api"} in s["edges"]
+    assert {"from": "api", "to": "redis"} not in s["edges"]  # redis is fine: that edge carries nothing
+    both = spread(topology, None, {"postgres", "redis"})
+    assert both["at_risk"] == ["api", "prometheus"]

@@ -47,10 +47,25 @@ def incident_start(anomalies: list[Anomaly], history: dict[str, deque], detected
     return min([detected_at, *check_starts(anomalies, history, detected_at).values()])
 
 
+def deepest_failing(topology: dict[str, list[str]], failing: set[str]) -> set[str]:
+    """The failing services that do not depend, even indirectly, on another failing service: where a failure that
+    travels up the call chain most plausibly starts (postgres down makes the api fail, not the other way round)."""
+    def reach(svc: str) -> set[str]:
+        seen, todo = set(), list(topology.get(svc, []))
+        while todo:
+            d = todo.pop()
+            if d not in seen:
+                seen.add(d)
+                todo.extend(topology.get(d, []))
+        return seen
+
+    return {s for s in failing if not (reach(s) & (failing - {s}))}
+
+
 def spread(topology: dict[str, list[str]], origin: str | None, failing: set[str]) -> dict[str, Any]:
     """Who is affected, who is at risk, and which call edges carry the failure.
 
-    topology maps a service to the services it calls. Everything that (transitively) calls the
+    topology maps a service to the services it calls. Everything that (transitively) calls a failing service or the
     origin can be hurt by it; those not already failing are "at risk".
     """
     callers: dict[str, set[str]] = {}
@@ -60,13 +75,12 @@ def spread(topology: dict[str, list[str]], origin: str | None, failing: set[str]
 
     affected = set(failing) | ({origin} if origin else set())
     exposed: set[str] = set()
-    if origin:
-        todo = [origin]
-        while todo:
-            for caller in callers.get(todo.pop(), ()):
-                if caller not in exposed:
-                    exposed.add(caller)
-                    todo.append(caller)
+    todo = list(affected)
+    while todo:
+        for caller in callers.get(todo.pop(), ()):
+            if caller not in exposed:
+                exposed.add(caller)
+                todo.append(caller)
     at_risk = exposed - affected
 
     hot = affected | exposed
@@ -74,7 +88,7 @@ def spread(topology: dict[str, list[str]], origin: str | None, failing: set[str]
         {"from": svc, "to": d}
         for svc, deps in topology.items()
         for d in deps
-        if svc in hot and (d == origin or d in exposed)
+        if svc in hot and (d in affected or d in exposed)
     ]
     return {
         "origin": origin,
