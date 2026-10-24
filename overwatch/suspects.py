@@ -110,8 +110,28 @@ def _describe(container: str, group: list[tuple[float, dict[str, Any]]]) -> Susp
     return Suspect(group[0][0], service, kind, what)
 
 
+def failing_path(topology: dict[str, list[str]], failing_services: list[str]) -> set[str] | None:
+    """Services that can explain a failure in `failing_services`: themselves, everything they depend on, and everything
+    that calls them. None when there is no topology to judge by."""
+    if not topology:
+        return None
+    path = set(failing_services)
+    grew = True
+    while grew:
+        grew = False
+        for caller, deps in topology.items():
+            if caller in path:
+                new = {d for d in deps if d not in path}
+            else:
+                new = {caller} if any(d in path for d in deps) else set()
+            if new:
+                path |= new
+                grew = True
+    return path
+
+
 def annotate(suspects: list[Suspect], started_at: float, failing_between: Callable[[float, float], bool],
-             starts: dict[str, float] | None = None) -> list[str]:
+             starts: dict[str, float] | None = None, path: set[str] | None = None) -> list[str]:
     """Lines for the incident timeline, the suspect closest to a failure first. `starts` maps each failing check to the
     time it began failing; each suspect is described against those, because an incident can hold two problems and an
     event that came after the first check began failing may be exactly what started another. `failing_between(a, b)`
@@ -133,9 +153,14 @@ def annotate(suspects: list[Suspect], started_at: float, failing_between: Callab
     def following(s: Suspect) -> list[tuple[float, str]]:
         return sorted((t0 - s.ts, name) for name, t0 in starts.items() if t0 >= s.ts - 15)
 
-    def rank(s: Suspect) -> tuple[int, float]:
+    def related(s: Suspect) -> bool:
+        return path is None or s.service in path or not s.service or s.service == "?"
+
+    def rank(s: Suspect) -> tuple[int, int, float]:
         nxt = following(s)
-        return (0, nxt[0][0]) if nxt else (1, -s.ts)  # nearest to a failure first; events after every failure began last
+        # events in the failing path first, nearest to a failure first; events after every failure began, and events
+        # of services outside the failing path, last
+        return (0 if related(s) else 1, 0 if nxt else 1, nxt[0][0] if nxt else -s.ts)
 
     ranked = sorted(unique, key=rank)[:MAX_SUSPECTS]
     begins = ", ".join(f"{name} {clock(t0)}" for name, t0 in sorted(starts.items(), key=lambda kv: kv[1])[:6])
@@ -157,5 +182,8 @@ def annotate(suspects: list[Suspect], started_at: float, failing_between: Callab
         else:
             note = (f"every failing check had already begun failing before it ({', '.join(list(starts)[:3])}), so it did not start "
                     "those; it can only belong to a separate problem or be a response to them.")
+        if not related(s):
+            note += (f" Its service ({s.service}) is not in the failing path ({', '.join(sorted(path))[:100]}), so it is "
+                     "unlikely to be related unless the data links them.")
         lines.append(f"  S{i} {clock(s.ts)} {s.kind} on {s.service}: {s.what}. {note}")
     return lines

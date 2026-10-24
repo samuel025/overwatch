@@ -285,12 +285,18 @@ def reset() -> None:
     # (it looks at the last 30 minutes of changes), so the next fault would blame the previous one.
     for service, version in _injected_deploys():
         sql("opsdb", "DELETE FROM deploys WHERE service = %s AND version = %s", (service, version))
+    # Stop the faults' own jobs and release their locks FIRST: restarting the services while a lock is still held
+    # leaves payments pool errors in the logs, which the next fault's investigation then reads as its own.
+    try:
+        httpx.post(f"{CHAOS}/stop_all", timeout=10)
+    except httpx.HTTPError:
+        pass  # the chaos service itself may be down (service_down)
+    sql("shopdb", "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                  "WHERE application_name IN ('inventory-sync', 'nightly-revenue-report')")
     compose("start")  # anything a fault stopped (service_down)
     # Fresh processes: drops stale DB connections (after database_down), leaked memory and connections.
     compose("restart", "gateway", "orders", "payments-a", "payments-b")
     httpx.post(f"{CHAOS}/stop_all", timeout=10)
-    sql("shopdb", "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                  "WHERE application_name IN ('inventory-sync', 'nightly-revenue-report')")
     sql("shopdb", "CREATE INDEX IF NOT EXISTS orders_customer_id_idx ON orders (customer_id)")
     # Cumulative query statistics would still show the previous fault (e.g. an earlier DROP INDEX).
     sql("shopdb", "SELECT pg_stat_statements_reset()")

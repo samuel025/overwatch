@@ -36,7 +36,8 @@ How to work:
   before. A change long before the start is unlikely to be the cause unless the data shows a delayed effect.
 - A change shortly before the problem is a suspect, not proof. Show the mechanism that links it to the symptom.
 - The timeline lists suspect events (S1, S2...) that Overwatch computed, with how long before the problem each
-  happened and whether anything failed in between. Say which suspect your conclusion rests on. A suspect marked
+  happened and whether anything failed in between. Say which suspect your conclusion rests on. A suspect whose service is
+  not in the failing path is unlikely to be related; do not invent a mechanism that links it. A suspect marked
   as coming after every failing check had already begun, or one after which the system ran clean for minutes, is
   unlikely to have started that problem. Two separate problems can overlap in one incident: judge each suspect
   against the checks that began failing right after it.
@@ -341,7 +342,8 @@ class Investigator:
         if not re.fullmatch(r"S\d+", label):
             return
         line = next((l for l in timeline if l.strip().startswith(label + " ")), "")
-        weak = ("did not start" in line) or ("only a delayed" in line) or ("already failing in between" in line)
+        weak = ("did not start" in line) or ("only a delayed" in line) or ("already failing in between" in line) \
+               or ("not in the failing path" in line)
         if weak and incident.confidence > 0.5:
             incident.reasoning.append(
                 f"Confidence capped at 50% (was {incident.confidence:.0%}): the suspect it relies on ({label}) does not "

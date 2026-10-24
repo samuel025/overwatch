@@ -399,7 +399,8 @@ class Overwatch:
                     "SELECT count(*) FROM check_samples WHERE failing = 1 AND ts > :a AND ts < :b",
                     a=iso(a), b=iso(b))[0][0] > 0
 
-            return sus.annotate(found, started, failing_between, starts)
+            return sus.annotate(found, started, failing_between, starts,
+                                sus.failing_path(self.cfg.topology, incident.services))
         except Exception as e:  # suspects are a help, never a reason to fail an investigation
             self.events.emit("source.error", message=f"building the suspect list: {e}")
             return []

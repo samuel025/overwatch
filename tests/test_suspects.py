@@ -102,3 +102,35 @@ def test_a_conclusion_resting_on_a_suspect_the_timing_argues_against_is_capped()
         free = _incident(other)
         Investigator._cap_by_suspect(free, timeline)
         assert free.confidence == 0.9
+
+
+TOPOLOGY = {"gateway": ["orders", "payments"], "orders": ["postgres"], "payments": ["postgres", "psp.example.com"]}
+
+
+def test_the_failing_path_is_the_failing_services_their_dependencies_callers_and_neighbours_on_a_shared_dependency():
+    # orders is in it too: it shares postgres with payments, and a noisy neighbour can hurt it
+    assert sus.failing_path(TOPOLOGY, ["payments"]) == {"payments", "postgres", "psp.example.com", "gateway", "orders"}
+    assert sus.failing_path(TOPOLOGY, ["gateway"]) >= {"gateway", "orders", "payments", "postgres"}
+    assert "recommendations" not in sus.failing_path(TOPOLOGY, ["payments"])
+    assert sus.failing_path({}, ["payments"]) is None  # no topology: no way to judge
+
+
+def test_a_deploy_of_a_service_outside_the_failing_path_is_marked_unrelated_and_ranked_last():
+    """A background lock job broke payments; another team's deploy seconds earlier is noise, not its trigger."""
+    path = sus.failing_path(TOPOLOGY, ["payments", "gateway"])
+    noise = sus.Suspect(T0 - 6, "recommendations", "deploy", "v0.57.3 'Model refresh'")
+    real = sus.Suspect(T0 - 40, "payments", "config", "config-77 'pool size'")
+    lines = sus.annotate([noise, real], T0, lambda a, b: False, starts={"payments_errors": T0}, path=path)
+    assert "config-77" in lines[1] and "not in the failing path" not in lines[1]  # related first, though older
+    assert "recommendations" in lines[2] and "not in the failing path" in lines[2] and "unlikely to be related" in lines[2]
+    no_topology = sus.annotate([noise], T0, lambda a, b: False, starts={"x": T0}, path=None)
+    assert "not in the failing path" not in no_topology[1]
+
+
+def test_a_conclusion_resting_on_an_unrelated_service_is_capped():
+    timeline = ["  S1 06:19:54 deploy on recommendations: v0.57.3. 6 s before x began failing: immediately before. Its "
+                "service (recommendations) is not in the failing path (gateway, payments), so it is unlikely to be related "
+                "unless the data links them."]
+    inc = _incident("S1")
+    Investigator._cap_by_suspect(inc, timeline)
+    assert inc.confidence == 0.5
