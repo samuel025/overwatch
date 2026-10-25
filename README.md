@@ -444,7 +444,8 @@ Details:
 - Zetaris is reached over JDBC with its own driver (a Java runtime and the `zetaris` extra: `pip install -e ".[zetaris]"`). Only Overwatch's setup and startup flow runs DDL; agents can only run `SELECT`, `WITH`, `SHOW`, `DESCRIBE` and the `promql`/`logql` commands, whose expressions are percent-encoded so nothing an agent sends can change a statement.
 - Databases are re-registered at every start (`register:` in the config), so a restarted Zetaris heals itself.
 - If Zetaris runs in Docker on Linux, set `ZETARIS_HOST_ALIAS=172.17.0.1` so it can reach `localhost` services (databases, Prometheus).
-- Not yet through Zetaris: Kubernetes (it needs a bearer-token REST source; written against the docs but untested without a cluster). Raw log tailing for Kubernetes and Loki stays on live sources.
+- Loki goes through Zetaris too: discovery registers it as the `logql <expression>` command (a Zetaris REST table over Loki's `query_range`), hides the direct source from the Investigator, and keeps the Watcher's fast direct checks. Run live on 25 Oct against a real Loki: the Investigator ran `logql` queries and a SQL query on Overwatch's own history in one investigation and diagnosed the incident correctly (`eval/loki-through-zetaris.md`).
+- Not yet through Zetaris: Kubernetes (it needs a bearer-token REST source over the cluster's own certificate; Kubernetes stays a live source, which works, see above).
 
 
 ### Built in, no setup needed
