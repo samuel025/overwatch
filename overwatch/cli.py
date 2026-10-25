@@ -30,8 +30,7 @@ def cmd_doctor(ow: Overwatch) -> int:
     print("Sources")
     for name, src in ow.sources.items():
         try:
-            src.query("vector(1)" if src.language == "PromQL" else "containers" if name == "docker" or
-                      src.cfg.get("type") == "docker" else "SELECT 1")
+            src.ping()
             good &= _ok(name, True, src.language)
         except Exception as e:
             good &= _ok(name, False, str(e))

@@ -33,6 +33,9 @@ class PrometheusSource(DataSource):
             timeout=float(cfg.get("timeout_seconds", 10)),
         )
 
+    def ping(self) -> None:
+        self.query("vector(1)")
+
     def query(self, q: str) -> list[dict[str, Any]]:
         try:
             r = self.client.get("/api/v1/query", params={"query": q})

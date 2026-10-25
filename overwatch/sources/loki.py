@@ -45,6 +45,9 @@ class LokiSource(DataSource):
             raise SourceError(f"loki returned HTTP {r.status_code}: {r.text[:200]}")
         return r.json()
 
+    def ping(self) -> None:
+        self.labels()
+
     def query(self, q: str) -> list[dict[str, Any]]:
         q = q.strip()
         if not q:

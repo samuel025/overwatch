@@ -11,6 +11,7 @@ saved to FAULT_FILE so they survive a container restart (a memory leak becomes a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import random
@@ -172,6 +173,43 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+tracer = None  # set by setup_tracing()
+
+
+def db_span(name: str, statement: str):
+    """A client span for one database call, so a trace shows the query and how long it took. Does nothing when tracing is off."""
+    if tracer is None:
+        return contextlib.nullcontext()
+    from opentelemetry.trace import SpanKind
+
+    return tracer.start_as_current_span(name, kind=SpanKind.CLIENT, attributes={"db.system": "postgresql", "db.name": "shopdb", "db.statement": statement})
+
+
+def setup_tracing() -> None:
+    """Optional OpenTelemetry traces: only when OTEL_EXPORTER_OTLP_ENDPOINT is set (see docker-compose.yml, profile `tracing`)."""
+    global tracer
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not endpoint:
+        return
+    from opentelemetry import trace
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    provider = TracerProvider(resource=Resource.create({"service.name": SERVICE, "service.instance.id": INSTANCE}))
+    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint.rstrip("/") + "/v1/traces")))
+    trace.set_tracer_provider(provider)
+    tracer = trace.get_tracer("demo-shop")
+    FastAPIInstrumentor.instrument_app(app, excluded_urls="health,admin", exclude_spans=["receive", "send"])
+    HTTPXClientInstrumentor().instrument()
+
+
+setup_tracing()
+
+
 @app.middleware("http")
 async def measure(request: Request, call_next):
     if request.url.path.startswith("/admin") or request.url.path == "/health":
@@ -232,24 +270,22 @@ async def list_orders(customer_id: int):
     async with shop_pool.connection() as conn:
         if fault["n_plus_one"]:
             # Load order details lazily: one query for ids, then one query per order.
-            cur = await conn.execute(
-                "SELECT id FROM orders WHERE customer_id = %s ORDER BY created_at DESC LIMIT 20", (customer_id,)
-            )
+            sql_ids = "SELECT id FROM orders WHERE customer_id = %s ORDER BY created_at DESC LIMIT 20"
+            with db_span("SELECT shopdb.orders ids", sql_ids):
+                cur = await conn.execute(sql_ids, (customer_id,))
+                order_ids = await cur.fetchall()
             rows = []
-            for (order_id,) in await cur.fetchall():
-                c = await conn.execute(
-                    "SELECT o.id, o.amount, o.status, o.created_at, "
-                    "(SELECT count(*) FROM payments p WHERE p.order_id = o.id) AS payments "
-                    "FROM orders o WHERE o.id = %s",
-                    (order_id,),
-                )
-                rows.append(await c.fetchone())
+            for (order_id,) in order_ids:
+                sql_one = ("SELECT o.id, o.amount, o.status, o.created_at, "
+                           "(SELECT count(*) FROM payments p WHERE p.order_id = o.id) AS payments FROM orders o WHERE o.id = %s")
+                with db_span("SELECT shopdb.orders by id", sql_one):
+                    c = await conn.execute(sql_one, (order_id,))
+                    rows.append(await c.fetchone())
         else:
-            cur = await conn.execute(
-                "SELECT id, amount, status, created_at FROM orders WHERE customer_id = %s ORDER BY created_at DESC LIMIT 20",
-                (customer_id,),
-            )
-            rows = await cur.fetchall()
+            sql = "SELECT id, amount, status, created_at FROM orders WHERE customer_id = %s ORDER BY created_at DESC LIMIT 20"
+            with db_span("SELECT shopdb.orders", sql):
+                cur = await conn.execute(sql, (customer_id,))
+                rows = await cur.fetchall()
     return {"customer_id": customer_id, "orders": len(rows)}
 
 
@@ -284,10 +320,9 @@ async def pay(body: dict):
         async with shop_pool.connection() as conn:
             if fault["hold_connection_ms"]:
                 await conn.execute("SELECT pg_sleep(%s)", (fault["hold_connection_ms"] / 1000,))
-            await conn.execute(
-                "INSERT INTO payments (order_id, amount, status) VALUES (%s, %s, 'captured')",
-                (body.get("order_id", 0), amount),
-            )
+            sql_pay = "INSERT INTO payments (order_id, amount, status) VALUES (%s, %s, 'captured')"
+            with db_span("INSERT shopdb.payments", sql_pay):
+                await conn.execute(sql_pay, (body.get("order_id", 0), amount))
     except Exception as e:
         if "timeout" in str(e).lower() or e.__class__.__name__ == "PoolTimeout":
             await fail("PoolTimeout: couldn't get a connection after 2.00 sec")

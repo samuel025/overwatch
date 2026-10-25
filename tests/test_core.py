@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -273,6 +274,23 @@ def test_grounding_flags_infrastructure_the_data_never_mentioned():
     g = grounding.check(inc, "orders runs on Docker Compose")
     assert "Kubernetes" in g["unsupported_terms"] and "v1.9.0" in g["unsupported_terms"]
     assert not g["ok"]
+
+
+def test_a_diagnosis_built_on_log_lines_from_long_before_the_problem_is_flagged_and_capped():
+    from overwatch import grounding
+
+    rows = [{"ts": "2026-10-25T09:38:36.5Z", "line": "ConnectError: No address associated with hostname"},
+            {"ts": "2026-10-25T10:01:00.0Z", "line": "ERROR POST /pay 500: upstream connection reset by peer"}]
+    inc = _grounded_incident("DNS failure for the payment provider.", [
+        {"step": 1, "quote": "ConnectError: No address associated with hostname"}], rows)
+    inc.blast_radius = {"started_at": datetime(2026, 10, 25, 10, 0, 10, tzinfo=timezone.utc).timestamp()}
+    g = grounding.check(inc, "")
+    assert g["stale"] and not g["ok"] and g["cap"] == 0.6
+    inc.cited = [{"step": 1, "quote": "ERROR POST /pay 500: upstream connection reset by peer"}]  # a current error is fine
+    assert grounding.check(inc, "")["stale"] == []
+    inc.cited = [{"step": 1, "quote": "upstream connection reset"}, {"step": 1, "quote": "No address associated"},
+                 {"step": 1, "quote": "ERROR POST /pay 500"}]  # lead is current, only one of three is old: not flagged
+    assert grounding.check(inc, "")["stale"] == []
 
 
 def test_well_grounded_conclusion_keeps_its_confidence_and_badly_grounded_is_capped():

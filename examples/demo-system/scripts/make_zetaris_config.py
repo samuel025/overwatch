@@ -32,8 +32,8 @@ registration = '''
 # databases are registered in Zetaris at every start, so a restarted Zetaris heals itself.
 state_url: ${OVERWATCH_STATE_URL}
 register:
-  opsdb: postgresql+psycopg://overwatch_ro:overwatch_ro@localhost:55432/opsdb
-  shopdb: postgresql+psycopg://overwatch_ro:overwatch_ro@localhost:55432/shopdb
+  opsdb: postgresql+psycopg://overwatch_ro:overwatch_ro@localhost:15432/opsdb
+  shopdb: postgresql+psycopg://overwatch_ro:overwatch_ro@localhost:15432/shopdb
 '''
 
 sources = '''
@@ -47,7 +47,7 @@ sources:
     password: ${ZETARIS_PASSWORD}
   shopdb_live:        # live Postgres internals (sessions, locks, indexes) are not tables Zetaris can register
     type: postgres
-    url: postgresql+psycopg://overwatch_ro:overwatch_ro@localhost:55432/shopdb
+    url: postgresql+psycopg://overwatch_ro:overwatch_ro@localhost:15432/shopdb
 '''
 
 catalog_zetaris = '''

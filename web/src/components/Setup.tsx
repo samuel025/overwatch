@@ -26,6 +26,7 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
   const [useK8s, setUseK8s] = useState(state.kubernetes_in_cluster);
   const [k8s, setK8s] = useState({ url: "", token: "", namespace: "", service_label: "", ca_file: "", skip_tls: false });
   const [loki, setLoki] = useState({ url: "", tenant: "", token: "" });
+  const [traces, setTraces] = useState({ url: "", tenant: "", token: "" });
   const [prometheus, setPrometheus] = useState("");
   const [databases, setDatabases] = useState<{ name: string; url: string }[]>([{ name: "", url: "" }]);
   const [ai, setAi] = useState<AiSettings>({ base_url: state.ai_base_url, api_key: "", api_key_set: state.ai_configured, model: state.ai_model, triage_model: "", max_steps: 8 });
@@ -52,6 +53,7 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
         databases: databases.filter((d) => d.name && d.url),
         kubernetes: { enabled: useK8s, ...k8s },
         loki,
+        traces,
       });
       setPlan(res.plan);
       setYaml(res.yaml);
@@ -89,7 +91,7 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
     return t;
   })();
   const stepIndex = STEPS.findIndex((s) => s.id === step);
-  const canDiscover = useDocker || useK8s || !!loki.url || !!prometheus || databases.some((d) => d.url);
+  const canDiscover = useDocker || useK8s || !!loki.url || !!traces.url || !!prometheus || databases.some((d) => d.url);
 
   return (
     <div className="settings-shell setup">
@@ -174,6 +176,20 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
                 <>
                   <Field label="Tenant" hint="Optional. For multi-tenant Loki."><input value={loki.tenant} onChange={(e) => setLoki({ ...loki, tenant: e.target.value })} /></Field>
                   <Field label="Token" hint="Optional. Stored in .env."><input type="password" autoComplete="off" value={loki.token} onChange={(e) => setLoki({ ...loki, token: e.target.value })} /></Field>
+                </>
+              )}
+            </div>
+          </Section>
+
+          <Section title="Traces" description="Distributed traces show where a request spent its time and where it failed first. Overwatch reads them from Grafana Tempo or Jaeger (both take OpenTelemetry) and builds the real call graph from them.">
+            <div className="field-grid">
+              <Field label="Tempo or Jaeger" wide hint="Optional. Becomes a request-time and an error check per service, and the map of who calls whom. Needs services that emit OpenTelemetry traces.">
+                <input value={traces.url} onChange={(e) => setTraces({ ...traces, url: e.target.value })} placeholder="http://tempo:3200  or  http://jaeger:16686" />
+              </Field>
+              {traces.url && (
+                <>
+                  <Field label="Tenant" hint="Optional. For multi-tenant Tempo."><input value={traces.tenant} onChange={(e) => setTraces({ ...traces, tenant: e.target.value })} /></Field>
+                  <Field label="Token" hint="Optional. Stored in .env."><input type="password" autoComplete="off" value={traces.token} onChange={(e) => setTraces({ ...traces, token: e.target.value })} /></Field>
                 </>
               )}
             </div>

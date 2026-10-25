@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from .models import Incident
@@ -113,6 +114,51 @@ def _found(quote: str, text: str, empty_result: bool = False) -> bool:
     return hits / len(tokens) >= 0.75
 
 
+STALE_MINUTES = 10  # evidence this much older than the problem is history, not cause
+_TS = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}")
+
+
+def _epoch(text: str) -> float | None:
+    try:
+        return datetime.fromisoformat(text.replace(" ", "T")).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def _quote_time(incident: Incident, quote: str) -> float | None:
+    """When the row a quote comes from happened: its own `ts` (log lines). The row is found by its text anywhere in the
+    results, because a model can mis-number the step it cites."""
+    q = _norm(quote)
+    if not q:
+        return None
+    for ev in [*incident.evidence, *incident.pack]:
+        for row in ev.rows:
+            if isinstance(row, dict) and row.get("ts") and q in _norm(json.dumps(row, default=str)):
+                m = _TS.search(str(row["ts"]))
+                return _epoch(m.group(0)) if m else None
+    return None
+
+
+def stale_quotes(incident: Incident) -> list[dict[str, Any]]:
+    """Cited log lines that predate the problem by more than STALE_MINUTES, when the lead one or most of the dated ones do:
+    a diagnosis built on an old, finished error (a startup blip) rather than on what is failing now."""
+    start = incident.blast_radius.get("started_at") if isinstance(incident.blast_radius, dict) else None
+    if not start:
+        m = _TS.search(incident.opened_at or "")
+        start = _epoch(m.group(0)) if m else None
+    if not start:
+        return []
+    dated = []
+    for c in incident.cited:
+        t = _quote_time(incident, str(c.get("quote", "")))
+        if t is not None:
+            dated.append((c, start - t > STALE_MINUTES * 60))
+    old = [c for c, is_old in dated if is_old]
+    if old and (dated[0][1] or len(old) * 2 >= len(dated)):
+        return [{"step": c.get("step"), "quote": c.get("quote", "")} for c in old]
+    return []
+
+
 def check(incident: Incident, known_text: str) -> dict[str, Any]:
     """`known_text`: what Overwatch told the model (description, catalog, topology, timeline...)."""
     cited = incident.cited
@@ -157,15 +203,16 @@ def check(incident: Incident, known_text: str) -> dict[str, Any]:
             unsupported.append(label)
             claim_gaps.append(label)
 
+    stale = stale_quotes(incident)
     total = len(cited)
     score = (verified / total) if total else 0.0
-    ok = total > 0 and score >= 0.6 and not unsupported
+    ok = total > 0 and score >= 0.6 and not unsupported and not stale
     # How far a poorly grounded diagnosis may be trusted. Quotes that are not in the data, or a state claim nothing
     # shows ("the container was unhealthy"), are the serious failures. When every quote checks out and only an extra
     # term is unsupported (a word the model inferred, like "DNS" from a lookup error), that is a lighter doubt.
     if ok:
         cap = 1.0
-    elif total == 0 or score < 1.0 or claim_gaps:
+    elif total == 0 or score < 1.0 or claim_gaps or stale:
         cap = 0.6
     else:
         cap = 0.8 if len(unsupported) == 1 else 0.7
@@ -174,6 +221,7 @@ def check(incident: Incident, known_text: str) -> dict[str, Any]:
         "total": total,
         "unverified": unverified,
         "unsupported_terms": unsupported,
+        "stale": stale,
         "score": round(score, 2),
         "ok": ok,
         "cap": cap,

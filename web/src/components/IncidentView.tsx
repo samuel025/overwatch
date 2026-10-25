@@ -181,6 +181,7 @@ function Grounding({ incident }: { incident: Incident }) {
     <div className={clsx("grounding", limited ? "grounding-warn" : "grounding-ok")}>
       {limited ? "⚠" : "✓"} Evidence check: {g.verified}/{g.total} quotes found in the data
       {terms.length > 0 && <> · not in the data: <b>{terms.join(", ")}</b></>}
+      {(g.stale?.length ?? 0) > 0 && <> · <b>{g.stale!.length} cited log line{g.stale!.length > 1 ? "s" : ""} from long before the problem began</b></>}
       {limited && <span className="muted"> · confidence limited</span>}
       {claims.length > 0 && (
         <div className="grounding-claims">

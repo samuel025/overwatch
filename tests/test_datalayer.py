@@ -158,7 +158,7 @@ def test_zetaris_reaches_localhost_urls_through_the_docker_host_alias(monkeypatc
 
 
 def test_zetaris_mode_discovery_hides_covered_sources_and_keeps_live_postgres(monkeypatch):
-    monkeypatch.setenv("OVERWATCH_STATE_URL", "postgresql+psycopg://o:o@localhost:55433/overwatch")
+    monkeypatch.setenv("OVERWATCH_STATE_URL", "postgresql+psycopg://o:o@localhost:15433/overwatch")
     plan = discover(None, "", {}, zetaris=True)
     assert plan["sources"]["zetaris"]["type"] == "zetaris" and plan["state_url"] == "${OVERWATCH_STATE_URL}"
     monkeypatch.delenv("OVERWATCH_STATE_URL")

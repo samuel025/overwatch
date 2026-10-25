@@ -24,7 +24,7 @@ import type { BlastRadius } from "../types";
 
 const W = 172; // node card
 const H = 70;
-const FIT = { padding: 0.38, maxZoom: 0.95 }; // opens a little zoomed out, with room around the cards
+const FIT = { padding: 0.1, maxZoom: 1 }; // fills the box, with a little room around the cards
 const COL_GAP = 96;
 const ROW_GAP = 28;
 

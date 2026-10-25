@@ -89,6 +89,17 @@ sources:
 
 Kubernetes needs a service account that can `get`/`list` pods, `pods/log`, events and deployments in the namespace. Its commands are `pods`, `logs <service>`, `errors <service>`, `events [minutes]`, `rollouts` and `count <service|*> <minutes> <text>`, and `kind: container` checks work against it exactly as against Docker.
 
+```yaml
+  traces:
+    type: traces                 # distributed traces from Grafana Tempo or Jaeger (OpenTelemetry)
+    kind: tempo                  # or jaeger; detected from the URL when omitted
+    url: http://tempo:3200
+    tenant: team-a               # optional (X-Scope-OrgID)
+    bearer_token: ${TRACES_TOKEN}
+```
+
+Commands: `slow <service> [min_ms] [minutes] [limit]`, `errors <service> [minutes] [limit]`, `trace <trace_id>` (spans with self time, share of the request, and the deepest failing span as the failure origin), `graph [minutes]` (call-graph edges), `hotspots <service> [minutes]` (the spans repeated most within one request, with repeats per request; about five or more suggests an N+1 pattern), `p95 <service> [minutes]`, `error_count <service> [minutes]` and `error_pct <service> [minutes]` (the failed share of the newest traces; fewer than 20 requests count as 20, so one unlucky request on a quiet service does not alert. The generated error check uses this, with a 5% threshold). Only allowlisted span attributes are read (method, route, status, db system and name, peer service, exception type); URLs lose their query strings. Traces stay a live source, not routed through Zetaris. The demo's Postgres ports default to 15432 and 15433.
+
 Two sources are always available without configuration: `overwatch` (the built-in change log, SQLite, read-only) and, with a `docker:` section, `docker`.
 
 ### `catalog`
@@ -565,7 +576,7 @@ Register it in `SOURCE_TYPES` in `overwatch/sources/__init__.py`.
 | Memory panel says offline | Start `memory-service` (`npm start`) or set `memory.type: local`. |
 | Historian always finds "nothing similar" | Known limitation, see below. Seed past tickets with `seed_memory.py`. |
 | A relative check never fires | It needs about 10 samples older than 2 minutes before it has a baseline ("learning" in the console). |
-| Port 55432 in use | The demo Postgres port is `DEMO_PG_PORT` (default 55432) in `docker-compose.yml`. |
+| Port 15432 in use | The demo Postgres port is `DEMO_PG_PORT` (default 15432) in `docker-compose.yml`. |
 | Demo shop seems stuck after a fault | `python scripts/inject_fault.py reset`. |
 | Setup page says Docker is not reachable | Overwatch needs read access to `/var/run/docker.sock` (run it as a user in the `docker` group). |
 | Discovery found no checks in a database | It recognises metrics tables by a `service` column plus latency/error columns and a timestamp; add checks for anything else by hand. |

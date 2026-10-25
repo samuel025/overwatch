@@ -22,7 +22,7 @@ from typing import Callable
 import httpx
 import psycopg
 
-PG = os.environ.get("DEMO_PG", "postgresql://postgres:postgres@localhost:55432")
+PG = os.environ.get("DEMO_PG", "postgresql://postgres:postgres@localhost:15432")
 INSTANCES = {
     "gateway": "http://localhost:8001",
     "orders": "http://localhost:8002",

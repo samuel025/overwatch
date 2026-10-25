@@ -23,6 +23,10 @@ Your job: find the ROOT CAUSE (not just the symptom) and prove it with data.
 How to work:
 - Form a hypothesis, then run ONE read-only query to test it. Look at the result, refine, repeat.
 - Correlate across sources: metrics show WHAT changed, deploy/change history shows WHEN and WHY.
+- If you have a traces source, use it early. `slow` and `errors` list requests with the span that took the time or failed
+  first; open one with `trace <id>`. A span's own time (self_ms) and its share of the request show where the time went, and
+  `failed_at` shows where a failure began, which is often not the service that reported it. Prefer what a trace shows to
+  guesses from averages, and quote the span (service, operation, milliseconds) as evidence.
 - Similar past incidents are hints, not proof. Confirm them against current data before relying on them.
 - Consider every class of cause, not just the latest deploy: code or config changes, a slow or failing
   dependency, resource saturation (CPU, memory, connections, pools), locks and long transactions,
@@ -34,6 +38,10 @@ How to work:
 - Gradual problems (leaks, growing queues, filling disks) show as a trend: compare several time windows.
 - Use the incident timeline. A cause must start BEFORE (or exactly when) the problem started, usually just
   before. A change long before the start is unlikely to be the cause unless the data shows a delayed effect.
+- Log lines and trace rows carry timestamps: read them. An error that appears only in lines from well before the
+  problem began (a startup blip, an old restart) is history, not the cause; look for errors that are still happening
+  during the incident, and say so when a log shows an old error that has stopped. A problem that is a few stray
+  errors among many healthy requests may be background noise: say that instead of inventing a cause.
 - A change shortly before the problem is a suspect, not proof. Show the mechanism that links it to the symptom.
 - The timeline lists suspect events (S1, S2...) that Overwatch computed, with how long before the problem each
   happened and whether anything failed in between. Say which suspect your conclusion rests on. A suspect whose service is
@@ -301,6 +309,8 @@ class Investigator:
             incident.reasoning.append(
                 f"Confidence capped at {cap:.0%} (was {incident.confidence:.0%}): {result['verified']}/{result['total']} "
                 f"quotes verified, not found in the data: {', '.join(result['unsupported_terms']) or 'none'}"
+                + (f"; {len(result['stale'])} cited log line(s) are from more than {grounding.STALE_MINUTES} minutes before the "
+                   "problem began (history, not a current error)" if result.get("stale") else "")
             )
             incident.confidence = cap
         self._cap_by_suspect(incident, timeline or [])

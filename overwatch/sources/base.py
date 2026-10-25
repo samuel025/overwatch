@@ -25,6 +25,11 @@ class DataSource(ABC):
     def query(self, q: str) -> list[dict[str, Any]]:
         """Run a read-only query and return at most `max_rows` rows."""
 
+    def ping(self) -> None:
+        """A cheap check that the source answers (used by `overwatch doctor`). SQL sources run SELECT 1; command-style
+        sources override this with a command of their own."""
+        self.query("SELECT 1")
+
     def close(self) -> None:
         pass
 

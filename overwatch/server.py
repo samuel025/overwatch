@@ -72,6 +72,12 @@ class LokiIn(BaseModel):
     token: str = ""
 
 
+class TracesIn(BaseModel):
+    url: str = ""
+    tenant: str = ""
+    token: str = ""
+
+
 class DatabaseIn(BaseModel):
     name: str
     url: str
@@ -83,6 +89,7 @@ class DiscoverIn(BaseModel):
     databases: list[DatabaseIn] = Field(default_factory=list)
     kubernetes: KubernetesIn = Field(default_factory=KubernetesIn)
     loki: LokiIn = Field(default_factory=LokiIn)
+    traces: TracesIn = Field(default_factory=TracesIn)
 
 
 class AiIn(BaseModel):
@@ -211,7 +218,8 @@ def create_app(ow: Overwatch | None, watch: bool = True, token: str | None = Non
                                                             if d.name.strip() and d.url.strip()},
                         zetaris=bool(zetaris_env()),
                         kubernetes={**body.kubernetes.model_dump(exclude={'ca_file', 'skip_tls'}), 'verify': body.kubernetes.verify()} if body.kubernetes.enabled else None,
-                        loki=body.loki.model_dump() if body.loki.url.strip() else None)
+                        loki=body.loki.model_dump() if body.loki.url.strip() else None,
+                        traces=body.traces.model_dump() if body.traces.url.strip() else None)
         text, _ = render(plan)
         return {"plan": plan, "yaml": text}
 

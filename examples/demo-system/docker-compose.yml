@@ -19,7 +19,7 @@ services:
     environment:
       POSTGRES_PASSWORD: postgres
     command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements", "-c", "pg_stat_statements.track=all"]
-    ports: ["${DEMO_PG_PORT:-55432}:5432"]
+    ports: ["${DEMO_PG_PORT:-15432}:5432"]
     cpus: 1  # a small database server, so a runaway job can actually saturate it
     labels: { shop.service: postgres, shop.instance: postgres }
     volumes:
@@ -32,7 +32,7 @@ services:
 
   orders:
     <<: *service
-    environment: { SERVICE: orders, INSTANCE: orders }
+    environment: { SERVICE: orders, INSTANCE: orders, OTEL_EXPORTER_OTLP_ENDPOINT: "${DEMO_OTLP_ENDPOINT:-}" }
     labels: { shop.service: orders, shop.instance: orders }
     ports: ["8002:8000"]
     mem_limit: 256m  # so the memory_leak fault ends in OOM kills and restarts
@@ -42,6 +42,7 @@ services:
     environment:
       SERVICE: payments
       INSTANCE: payments-a
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${DEMO_OTLP_ENDPOINT:-}
       PROVIDER_URL: http://psp.example.com:8000/psp   # the external card processor (played by chaos)
     labels: { shop.service: payments, shop.instance: payments-a }
     ports: ["8003:8000"]
@@ -51,16 +52,26 @@ services:
     environment:
       SERVICE: payments
       INSTANCE: payments-b
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${DEMO_OTLP_ENDPOINT:-}
       PROVIDER_URL: http://psp.example.com:8000/psp   # the external card processor (played by chaos)
     labels: { shop.service: payments, shop.instance: payments-b }
     ports: ["8005:8000"]
 
   gateway:
     <<: *service
-    environment: { SERVICE: gateway, INSTANCE: gateway }
+    environment: { SERVICE: gateway, INSTANCE: gateway, OTEL_EXPORTER_OTLP_ENDPOINT: "${DEMO_OTLP_ENDPOINT:-}" }
     labels: { shop.service: gateway, shop.instance: gateway }
     ports: ["8001:8000"]
     depends_on: [orders, payments-a, payments-b]
+
+  # Traces: start with `DEMO_OTLP_ENDPOINT=http://tempo:4318 docker compose --profile tracing up -d --build`.
+  # Without it the services emit nothing and Tempo does not run, so the faults behave exactly as before.
+  tempo:
+    image: grafana/tempo:2.6.1
+    profiles: ["tracing"]
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes: ["./tracing/tempo.yaml:/etc/tempo.yaml:ro"]
+    ports: ["3200:3200", "4318:4318"]
 
   chaos:
     <<: *service

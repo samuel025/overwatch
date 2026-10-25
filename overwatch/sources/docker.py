@@ -37,6 +37,9 @@ class DockerSource(DataSource):
             raise SourceError(f"no containers for service '{service}'. Known services: {', '.join(known)}")
         return found
 
+    def ping(self) -> None:
+        self.query("containers")
+
     def query(self, q: str) -> list[dict[str, Any]]:
         parts = q.strip().split()
         if not parts:

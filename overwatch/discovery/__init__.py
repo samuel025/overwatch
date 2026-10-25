@@ -23,6 +23,7 @@ from ..datalayer import source_config
 from .docker import discover_docker
 from .kubernetes import discover_kubernetes
 from .loki import discover_loki
+from .traces import discover_traces
 from .externals import merge_suggestions
 from .prometheus import discover_prometheus
 from .sql import discover_sql, sqlalchemy_url
@@ -39,6 +40,14 @@ def match_service(name: str, known: set[str]) -> str | None:
     mine = words(name)
     hits = [k for k in known if words(k) and len(mine) > len(words(k)) and mine[-len(words(k)):] == words(k)]
     return hits[0] if len(hits) == 1 else None
+
+
+def replica_group(name: str, known: set[str]) -> list[str]:
+    """Traces call the service "payments"; Docker runs it as the replicas "payments-a" and "payments-b". The replicas it
+    stands for, when no service of that exact name exists."""
+    if name in known:
+        return []
+    return sorted(k for k in known if re.fullmatch(re.escape(name) + r"[-_][a-z0-9]+", k.lower()))
 
 
 def _database_service(url: str, services: dict[str, Any]) -> str | None:
@@ -79,13 +88,15 @@ def _slow_query_check(name: str, source: str, service: str) -> dict[str, Any]:
 
 def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
              databases: dict[str, str] | None = None, zetaris: bool = False,
-             kubernetes: dict[str, Any] | None = None, loki: dict[str, Any] | None = None) -> dict[str, Any]:
+             kubernetes: dict[str, Any] | None = None, loki: dict[str, Any] | None = None,
+             traces: dict[str, Any] | None = None) -> dict[str, Any]:
     """docker: {"project": ..., "service_label": ..., "socket": ...} or None to skip.
 
     zetaris: this deployment's data layer is Zetaris, so databases are registered there and the generated
     checks and evidence are Spark SQL over <name>.<table>, not direct connections.
     kubernetes: {"url", "token", "namespace", "service_label", "verify"} (all optional in a cluster) or None to skip.
-    loki: {"url", "tenant", "token"} or None to skip."""
+    loki: {"url", "tenant", "token"} or None to skip.
+    traces: {"url", "tenant", "token"} (Grafana Tempo or Jaeger) or None to skip."""
     plan: dict[str, Any] = {
         "system": {"name": "my-system", "description": ""}, "docker": {}, "services": {}, "runtime_facts": "",
         "sources": {}, "catalog": [], "topology": {}, "checks": [], "evidence": [], "notes": [], "errors": [],
@@ -155,6 +166,43 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
             plan["log_source"] = plan["log_source"] or {"type": "loki", "source": "loki", "label": lk["label"]}
         except Exception as e:
             plan["errors"].append(f"Loki at {loki['url']}: {e}")
+
+    if traces is not None and traces.get("url"):
+        try:
+            tr = discover_traces(traces["url"], tenant=traces.get("tenant", ""), token=traces.get("token", ""))
+            plan["sources"]["traces"] = tr["source"]
+            plan["catalog"].append(tr["catalog"])
+            plan["evidence"] += tr["evidence"]
+            known = set(plan["services"])
+            groups = {n: g for n in tr["services"] if (g := replica_group(n, known))}
+            checks = []
+            for c in tr["checks"]:  # traces see the replicas as one service: every replica carries the check, none is singled out
+                real = groups.get(c["service"])
+                if not real:
+                    checks.append(c)
+                    continue
+                for r in real:
+                    checks.append({**c, "name": c["name"].replace(c["service"].replace("-", "_"), r.replace("-", "_"), 1), "service": r,
+                                   "description": c.get("description", "") + f" (all of {', '.join(real)})"})
+            plan["checks"] += checks
+            for svc in tr["services"]:
+                if svc not in groups:
+                    plan["services"].setdefault(svc, {"what": "TODO: describe what this service does"})
+            for svc, deps in tr["topology"].items():  # the calls traces actually saw
+                for caller in groups.get(svc, [svc]):
+                    plan["topology"].setdefault(caller, [])
+                    plan["topology"][caller] += [r for d in deps for r in groups.get(d, [d])
+                                                 if r not in plan["topology"][caller] and r != caller]
+            plan["notes"] += [f"Traces call '{n}' what Docker runs as {', '.join(g)}: its trace checks count all of them and sit on each."
+                              for n, g in sorted(groups.items())]
+            for svc, hosts in tr["log_hits"].items():
+                for real in groups.get(svc, [svc]):
+                    log_hits.setdefault(real, {}).update(hosts)
+            internal |= set(tr["internal"])
+            plan["notes"].append(f"Traces ({tr['kind']}): {len(tr['services'])} services and their calls were read from real requests"
+                                 + (f"; databases seen: {', '.join(sorted({d for v in tr['databases'].values() for d in v}))}" if tr["databases"] else "") + ".")
+        except Exception as e:
+            plan["errors"].append(f"Traces at {traces['url']}: {e}")
 
     if prometheus_url:
         try:

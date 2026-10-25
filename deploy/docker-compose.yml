@@ -2,7 +2,7 @@
 # When Zetaris is the data layer (the default), this is the Postgres Zetaris reads those tables from.
 #   docker compose -f deploy/docker-compose.yml up -d
 # then put this in .env (the same line is in .env.example):
-#   OVERWATCH_STATE_URL=postgresql+psycopg://overwatch:overwatch@localhost:55433/overwatch
+#   OVERWATCH_STATE_URL=postgresql+psycopg://overwatch:overwatch@localhost:15433/overwatch
 services:
   overwatch-state:
     image: postgres:16-alpine
@@ -13,7 +13,7 @@ services:
       POSTGRES_PASSWORD: ${OVERWATCH_STATE_PASSWORD:-overwatch}
       POSTGRES_DB: overwatch
     ports:
-      - "55433:5432"   # reachable from Zetaris (it runs in Docker); firewall this port on a shared machine
+      - "15433:5432"   # reachable from Zetaris (it runs in Docker); firewall this port on a shared machine
     volumes:
       - overwatch_state:/var/lib/postgresql/data
     healthcheck:

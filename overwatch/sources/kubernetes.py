@@ -94,6 +94,9 @@ class KubernetesSource(DataSource):
 
     # -- queries ------------------------------------------------------------------------------
 
+    def ping(self) -> None:
+        self.pods()
+
     def query(self, q: str) -> list[dict[str, Any]]:
         parts = q.strip().split()
         if not parts:

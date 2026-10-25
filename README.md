@@ -203,7 +203,7 @@ Overwatch does not plug into your services. It reads the data they already produ
 
 **1. The setup page (easiest).** Run `overwatch run` in a folder with no config and the console opens on *Connect your system*:
 
-1. **Connect:** where your services run (Docker Compose is detected automatically; or a Kubernetes cluster, with its CA file or, as a last resort, a switch to skip certificate checks; and/or Loki for logs), optionally a Prometheus address and databases, and your AI provider with **Test connection**.
+1. **Connect:** where your services run (Docker Compose is detected automatically; or a Kubernetes cluster, with its CA file or, as a last resort, a switch to skip certificate checks; and/or Loki for logs), optionally Prometheus, a trace store (Grafana Tempo or Jaeger) and databases, and your AI provider with **Test connection**.
 2. **Review system:** a map of what was found, the external services it spotted, and a sentence per service. **Draft with AI** writes a first version of every empty description from facts Overwatch already holds (images, who calls whom, check names). It sends no secrets, never overwrites your words, names well-known software only when its image says so (anything else is described by its place in the system), and tags drafts *AI draft: check it* until you edit them.
 3. **Checks & alerts:** the proposed checks with a reason for each, notifications, timings, and a preview of the file it will write. **Save and start watching** starts immediately.
 
@@ -219,7 +219,7 @@ overwatch run
 
 **3. By hand:** `overwatch init` writes a commented starter file; see the [configuration reference](docs/REFERENCE.md#configuration-reference).
 
-Discovery reads Docker/Compose (services, who calls whom, health endpoints), Kubernetes (services from pod labels), Loki (services and an error-rate check each), Prometheus (standard request metrics) and SQL databases (tables, change logs, logs, metrics). Latency checks compare each service to its own normal, so nobody has to guess a threshold. Secrets go into `.env`, never into `overwatch.yaml`. [What discovery finds](docs/REFERENCE.md#what-discovery-finds) has the details.
+Discovery reads Docker/Compose (services, who calls whom, health endpoints), Kubernetes (services from pod labels), Loki (services and an error-rate check each), Tempo or Jaeger (services, call graph, latency and error checks per service), Prometheus (standard request metrics) and SQL databases (tables, change logs, logs, metrics). Latency checks compare each service to its own normal, so nobody has to guess a threshold. Secrets go into `.env`, never into `overwatch.yaml`. [What discovery finds](docs/REFERENCE.md#what-discovery-finds) has the details.
 
 ### What data it needs
 
@@ -230,9 +230,10 @@ Discovery reads Docker/Compose (services, who calls whom, health endpoints), Kub
 | Deploy and config change history | connect a problem to the change that caused it | CI/CD, a `deploys` table |
 | Database statistics (`pg_stat_activity`, `pg_stat_statements`, `pg_locks`, `pg_indexes`) | find slow queries, locks, missing indexes, connection problems | the database itself |
 | Container metrics (CPU, memory, restarts, OOM kills) | find leaks, crashes, saturation | Kubernetes, Docker |
+| Distributed traces (OpenTelemetry) | see where one slow or failing request spent its time, which span failed first, and repeated calls (N+1) | Grafana Tempo, Jaeger |
 | Past incident tickets | give the Historian something to remember | Jira export |
 
-The more you connect, the better the investigations. You do not need a logs table or a metrics table: Docker, Kubernetes and Loki are read from their own APIs.
+The more you connect, the better the investigations. You do not need a logs table or a metrics table: Docker, Kubernetes, Loki and traces are read from their own APIs.
 
 ### Issues it can detect and explain
 
@@ -283,13 +284,15 @@ The user never configures Zetaris: they connect their systems on the setup page 
 | Docker containers: state, events, log lines | A bounded window is mirrored into that same Postgres (`overwatch.container_state`, `container_events`, `container_logs`) |
 | Prometheus and Loki | The Investigator writes `promql <expression>` or `logql <expression>`; Overwatch turns it into a Zetaris REST table plus a flattening view |
 
-So one query can join "payments per minute before and after each deploy", or a container restart with the log lines around it. The Watcher keeps a fast direct path for checks (monitoring should not depend on a heavier path); the Investigator is offered only Zetaris, plus live Postgres internals such as `pg_stat_activity`, which are not tables. Kubernetes stays a live API source. Zetaris is reached over JDBC with its own driver (Java and the `zetaris` extra); only Overwatch's setup and startup run DDL, and agents can only run `SELECT`, `WITH`, `SHOW`, `DESCRIBE` and the `promql`/`logql` commands. Without the `ZETARIS_*` variables Overwatch starts in a `direct` development mode.
+So one query can join "payments per minute before and after each deploy", or a container restart with the log lines around it. The Watcher keeps a fast direct path for checks (monitoring should not depend on a heavier path); the Investigator is offered only Zetaris, plus live Postgres internals such as `pg_stat_activity`, which are not tables. Kubernetes and traces stay live API sources. Zetaris is reached over JDBC with its own driver (Java and the `zetaris` extra); only Overwatch's setup and startup run DDL, and agents can only run `SELECT`, `WITH`, `SHOW`, `DESCRIBE` and the `promql`/`logql` commands. Without the `ZETARIS_*` variables Overwatch starts in a `direct` development mode.
 
 ---
 
 ## 6. The demo system and its faults
 
 `examples/demo-system/` is a small online shop built to be broken on purpose: a gateway, an orders service (3M rows), two payments replicas, Postgres, a container-metrics collector, a "chaos" service (the outside world, including the card processor) and a load generator at ~15 checkouts per second. Overwatch does not depend on it.
+
+Traces are optional: `DEMO_OTLP_ENDPOINT=http://tempo:4318 docker compose --profile tracing up -d --build` makes the shop emit OpenTelemetry traces to Tempo, then `python scripts/make_traces_config.py` writes `overwatch.traces.yaml` (run it with `overwatch -c overwatch.traces.yaml run`). The demo's Postgres ports are 15432 (shop) and 15433 (Overwatch state).
 
 Each fault records its true cause and the keywords a correct diagnosis must mention, so the benchmark can grade Overwatch automatically.
 
@@ -327,7 +330,7 @@ python verify_faults.py                                         # proves every f
 ## 7. Testing and results
 
 ```bash
-pytest                                       # 191 offline tests: no database, AI or memory service needed
+pytest                                       # 218 offline tests: no database, AI or memory service needed
 cd memory-service && npm run conformance     # the official H-MEM conformance suite
 PYTHON=.venv/bin/python scripts/k8s-smoke/run.sh   # real k3d cluster + real Loki (needs docker, k3d, kubectl)
 python eval/run_eval.py                      # the benchmark: every fault, memory on and off, graded against ground truth
@@ -340,6 +343,7 @@ python eval/run_eval.py                      # the benchmark: every fault, memor
 | Detection: does the Watcher catch every fault? | **18/18** with a healthy baseline before each injection | [`eval/fault-verification.md`](eval/fault-verification.md) |
 | Diagnosis with a real model (Nemotron) | `slow_query` correct three times (up to 98%); `service_down`, `lock_contention`, `bad_deploy` and `config_timeout` correct; a live URL-shortener app (killed and paused Postgres, killed Redis, connection exhaustion, slow queries) diagnosed correctly | spot checks during development |
 | Kubernetes, run live | discovery found all services; the crash-looping worker was diagnosed correctly from its logs, pods and events | `scripts/k8s-smoke/run.sh` |
+| Distributed traces, run live (Tempo and Jaeger) | the instrumented demo shop's real traces were read; with an N+1 fault it named the N+1 and cited the trace rows (one run; not faster, and a slow query was diagnosed correctly with or without traces) | `examples/demo-system/tracing/` |
 | Loki through Zetaris, run live | `logql` queries and Overwatch's history joined in one investigation, diagnosed correctly | [`eval/loki-through-zetaris.md`](eval/loki-through-zetaris.md) |
 
 ---
@@ -363,10 +367,10 @@ python eval/run_eval.py                      # the benchmark: every fault, memor
 ```
 overwatch/                 the product (Python, system-agnostic)
   agents/                  watcher, historian, investigator, responder
-  sources/                 sql, zetaris, prometheus, docker, kubernetes, loki
+  sources/                 sql, zetaris, prometheus, docker, kubernetes, loki, traces
   memory/                  H-MEM client (default), local and none
   notifiers/               console, slack, jira, webhook
-  discovery/               docker, kubernetes, loki, prometheus, sql discovery; renders overwatch.yaml + .env
+  discovery/               docker, kubernetes, loki, traces, prometheus, sql discovery; renders overwatch.yaml + .env
   orchestrator.py          pipeline, incident lifecycle, blast radius, evidence pack, timeline
   grounding.py, suspects.py  check a conclusion against the data; rank the events before a problem
   drafting.py              Draft with AI for service descriptions
@@ -375,7 +379,7 @@ overwatch/                 the product (Python, system-agnostic)
   ui/dist/                 the built console
 web/                       console source (React, Vite, TypeScript)
 memory-service/            H-MEM engine (TypeScript), HTTP server, conformance suite
-examples/demo-system/      the demo shop, its config and fault scripts
+examples/demo-system/      the demo shop, its config, fault scripts and tracing (Tempo)
 scripts/k8s-smoke/         live Kubernetes and Loki smoke test
 eval/                      benchmark runner and verification reports
 docs/REFERENCE.md          configuration, CLI, HTTP API, lifecycle, extending, troubleshooting

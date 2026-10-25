@@ -108,6 +108,7 @@ export interface Incident {
     unverified?: { step: number; quote: string }[];
     unsupported_terms?: string[];
     unsupported_claims?: string[];
+    stale?: { step: number; quote: string }[];
     ok?: boolean;
   };
 }

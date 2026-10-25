@@ -148,8 +148,8 @@ code { font: 11.5px var(--mono); }
 /* ---------- system map ---------- */
 .map-card { padding-bottom: 12px; }
 /* The system map: a pannable canvas of draggable service cards (React Flow). */
-.map-flow { height: 440px; border-radius: 10px; overflow: hidden; background: var(--bg); border: 1px solid var(--line-soft); }
-.map-flow-preview { height: 280px; }
+.map-flow { height: 560px; border-radius: 10px; overflow: hidden; background: var(--bg); border: 1px solid var(--line-soft); }
+.map-flow-preview { height: 520px; }
 .map-flow .react-flow { --xy-background-color: var(--bg); background: var(--bg); font-family: var(--sans); }
 .map-flow .react-flow__node { cursor: grab; }
 .map-flow .react-flow__node.dragging { cursor: grabbing; }

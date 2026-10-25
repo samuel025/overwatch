@@ -13,7 +13,7 @@ import time
 import httpx
 import psycopg
 
-PG = os.environ.get("DEMO_PG", "postgresql://postgres:postgres@localhost:55432")
+PG = os.environ.get("DEMO_PG", "postgresql://postgres:postgres@localhost:15432")
 
 
 def wait_for_tickets(timeout: int = 180) -> list[tuple]:

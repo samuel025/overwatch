@@ -8,6 +8,7 @@ from .kubernetes import KubernetesSource
 from .loki import LokiSource
 from .prometheus import PrometheusSource
 from .sql import SQLSource
+from .traces import TracesSource
 from .zetaris import ZetarisSource
 
 SOURCE_TYPES: dict[str, type[DataSource]] = {
@@ -18,6 +19,7 @@ SOURCE_TYPES: dict[str, type[DataSource]] = {
     "docker": DockerSource,
     "kubernetes": KubernetesSource,
     "loki": LokiSource,
+    "traces": TracesSource,  # Grafana Tempo or Jaeger: where a request spent its time, and where it failed first
 }
 
 
