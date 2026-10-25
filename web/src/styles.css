@@ -422,6 +422,10 @@ a.btn.header-settings { display: inline-flex; align-items: center; gap: 6px; tex
   border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 input::placeholder, textarea::placeholder { color: var(--faint); }
+.drafted { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)) !important; }
+.draft-tag { display: block; font-size: 11.5px; color: var(--accent); margin-top: 3px; }
+.draft-row { display: flex; align-items: center; gap: 14px; margin: 4px 0 12px; }
+.draft-row .field-hint { margin: 0; max-width: 640px; }
 .todo { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)) !important; }
 .unit-input { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: 11.5px; }
 .unit-input input { max-width: 110px; }

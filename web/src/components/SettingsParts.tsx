@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import clsx from "clsx";
-import { setupApi, type AiSettings, type External, type Notifiers, type WatchSettings } from "../api";
+import { toast } from "sonner";
+import { setupApi, type AiSettings, type DraftResult, type External, type Notifiers, type WatchSettings } from "../api";
 
 /** Form building blocks shared by the setup wizard and the settings page. */
 
@@ -277,5 +278,28 @@ export function WatchEditor({ watch, approval, onWatch, onApproval }: {
         </div>
       </div>
     </>
+  );
+}
+
+/** "Draft with AI": suggests the descriptions that are still empty or TODO. It never overwrites anything a person wrote. */
+export function DraftButton({ build, apply }: { build: () => unknown; apply: (r: DraftResult) => number }) {
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try {
+      const n = apply(await setupApi.draft(build()));
+      if (n) toast.success(`Drafted ${n} description${n === 1 ? "" : "s"}`, { description: "Read them before you save: the Investigator treats them as fact." });
+      else toast("Nothing to draft", { description: "Every description is already written." });
+    } catch (e) {
+      toast.error("Could not draft", { description: String(e).replace(/^Error: \d+ /, "").replace(/^\{"detail":"|"\}$/g, "") });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="draft-row">
+      <button type="button" className="btn" disabled={busy} onClick={run}>{busy ? "Drafting…" : "Draft with AI"}</button>
+      <span className="field-hint">Fills only the empty fields, from what Overwatch found (images, who calls whom). It never overwrites your words, and it does not guess what a service is for.</span>
+    </div>
   );
 }

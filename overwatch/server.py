@@ -92,6 +92,14 @@ class AiIn(BaseModel):
     triage_model: str = ""
 
 
+class DraftIn(BaseModel):
+    system: dict[str, Any] = Field(default_factory=dict)          # {name, description}
+    services: list[dict[str, Any]] = Field(default_factory=list)  # [{name, what, runs_on, image}]
+    topology: dict[str, list[str]] | None = None                  # omitted: the running configuration's
+    checks: list[dict[str, Any]] | None = None
+    ai: AiIn | None = None                                        # the wizard passes the provider it is about to save
+
+
 class ApplyIn(BaseModel):
     plan: dict[str, Any]
     ai: AiIn = Field(default_factory=AiIn)
@@ -216,6 +224,35 @@ def create_app(ow: Overwatch | None, watch: bool = True, token: str | None = Non
         if not base:
             return {"ok": False, "error": "Enter the AI provider's address."}
         return probe(base, key)
+
+    @app.post("/api/draft")
+    def draft_descriptions(body: DraftIn) -> dict:
+        """Suggest descriptions for the services and the system that are still empty or TODO. Nothing is saved."""
+        from .config import LLMConfig
+        from .drafting import draft
+        from .llm import LLMError
+
+        ow = rt.ow
+        if body.ai and (body.ai.base_url or body.ai.model):
+            key = body.ai.api_key or os.environ.get("LLM_API_KEY", "")
+            base = body.ai.base_url or os.environ.get("LLM_BASE_URL", "")
+            model = body.ai.model or os.environ.get("OVERWATCH_MODEL", "")
+            cfg = LLMConfig(base_url=base, api_key=key, investigator_model=model, summary_model=model,
+                            triage_model=body.ai.triage_model or os.environ.get("OVERWATCH_TRIAGE_MODEL", ""))
+        elif ow:
+            cfg = ow.cfg.llm
+        else:
+            model = os.environ.get("OVERWATCH_MODEL", "")
+            cfg = LLMConfig(base_url=os.environ.get("LLM_BASE_URL", ""), api_key=os.environ.get("LLM_API_KEY", ""),
+                            investigator_model=model, summary_model=model, triage_model=os.environ.get("OVERWATCH_TRIAGE_MODEL", ""))
+        if not cfg.base_url:
+            raise HTTPException(400, "Set up the AI provider first: drafting needs a model to write with.")
+        topology = body.topology if body.topology is not None else (ow.cfg.topology if ow else {})
+        checks = body.checks if body.checks is not None else ([{"name": c.name, "service": c.service} for c in ow.cfg.checks] if ow else [])
+        try:
+            return draft(cfg, body.system, body.services, topology, checks)
+        except LLMError as e:
+            raise HTTPException(502, f"The AI model could not draft the descriptions: {e}")
 
     @app.post("/api/setup/apply")
     def setup_apply(body: ApplyIn) -> dict:

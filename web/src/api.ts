@@ -134,9 +134,12 @@ export interface External {
 const post = <T,>(path: string, body: unknown) =>
   fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(json<T>);
 
+export interface DraftResult { system: string | null; services: Record<string, string> }
+
 export const setupApi = {
   state: () => fetch("/api/setup/state").then(json<SetupState>),
   discover: (body: unknown) => post<{ plan: Plan; yaml: string }>("/api/setup/discover", body),
+  draft: (body: unknown) => post<DraftResult>("/api/draft", body),
   testAi: (body: unknown) => post<{ ok: boolean; models?: string[]; error?: string }>("/api/setup/test-ai", body),
   apply: (body: unknown) => post<{ ok: boolean; config: string; backup: string | null; env: string }>("/api/setup/apply", body),
 };

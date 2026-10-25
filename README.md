@@ -423,7 +423,12 @@ Each one is suggested with the evidence ("payments has it in the PROVIDER_URL se
 
 In the demo shop, payments reaches the card processor through `PROVIDER_URL=http://psp.example.com:8000/psp`, so discovery finds `psp.example.com` on its own.
 
-Discovery still cannot know what each service is *for*: fill in the one-line descriptions. Kubernetes discovery is not supported yet.
+Discovery cannot know what each service is *for*, so it leaves a `TODO` for you to fill in. **Draft with AI** (in the wizard's review step and in Settings) writes a first version of every empty description from what Overwatch found: the image, how it runs, who calls whom, which checks watch it. It is deliberately modest:
+
+- only empty or `TODO` fields are drafted, never text a person wrote;
+- only facts go to the model (no environment values, tokens or connection strings);
+- well-known software is named only when its image states it outright (postgres, redis, nginx, prometheus...); for anything else the draft describes the service's place in the system and says its purpose has not been stated, so the model cannot turn "mq" inside a made-up name into "a message queue";
+- drafts are suggestions, outlined and tagged **AI draft: check it** until you edit them, and nothing is saved until you save.
 
 ### The data layer: Zetaris
 
@@ -798,7 +803,7 @@ The **Settings** button in the header opens a page with sections down the left. 
 
 | Section | What you can change |
 |---|---|
-| **System & services** | The system description, and per service what it does and what normal looks like |
+| **System & services** | The system description, and per service what it does and what normal looks like. **Draft with AI** fills the empty ones for you to check |
 | **External services** | Add, rename, remove or switch off third-party APIs; which of your services call each; a health/status URL; the error text to watch for in logs. Hand-written checks are updated in place |
 | **Checks** | Switch each check on or off; change its severity and limit |
 | **AI provider** | Nightshift / NVIDIA presets or any OpenAI-compatible address, key, models, investigation steps, **Test connection** |

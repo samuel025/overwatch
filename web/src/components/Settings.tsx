@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import { toast } from "sonner";
 import { settingsApi, type Settings as SettingsData } from "../api";
-import { AiEditor, ExternalsEditor, Field, NotificationsEditor, Section, Switch, WatchEditor } from "./SettingsParts";
+import { AiEditor, DraftButton, ExternalsEditor, Field, NotificationsEditor, Section, Switch, WatchEditor } from "./SettingsParts";
 import { SystemMap } from "./SystemMap";
 
 const SECTIONS = [
@@ -22,6 +22,8 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [draft, setDraft] = useState<SettingsData | null>(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [drafted, setDrafted] = useState<Record<string, boolean>>({}); // fields an AI wrote and nobody has edited yet
+  const edited = (key: string) => setDrafted((x) => (x[key] ? { ...x, [key]: false } : x));
   const [tab, setTab] = useState<SectionId>(() => {
     const want = window.location.hash.split("/")[1];
     return (SECTIONS.find((s) => s.id === want)?.id ?? "system") as SectionId;
@@ -94,17 +96,29 @@ export function Settings({ onClose }: { onClose: () => void }) {
               <div className="field-grid">
                 <Field label="System name"><input value={draft.system.name} onChange={(e) => update((d) => { d.system.name = e.target.value; })} /></Field>
                 <Field label="How it works" wide hint="One or two sentences: what it does and how a request flows through it.">
-                  <textarea rows={4} value={draft.system.description} onChange={(e) => update((d) => { d.system.description = e.target.value; })} />
+                  <textarea rows={4} className={clsx(drafted.__system && "drafted")} value={draft.system.description} onChange={(e) => { edited("__system"); update((d) => { d.system.description = e.target.value; }); }} />
+                  {drafted.__system && <span className="draft-tag">AI draft: check it</span>}
                 </Field>
               </div>
+              <DraftButton
+                build={() => ({ system: draft.system, services: draft.services.map((s) => ({ name: s.name, what: s.what, runs_on: s.facts || s.runs_on })) })}
+                apply={(r) => {
+                  const keys: Record<string, boolean> = {};
+                  draft.services.forEach((s) => { if (r.services[s.name]) keys[s.name] = true; });
+                  if (r.system) keys.__system = true;
+                  update((d) => { d.services.forEach((s) => { if (r.services[s.name]) s.what = r.services[s.name]; }); if (r.system) d.system.description = r.system; });
+                  setDrafted((x) => ({ ...x, ...keys }));
+                  return Object.keys(keys).length;
+                }} />
               <table className="s-table">
                 <thead><tr><th>Service</th><th>What it does</th><th>Normal behaviour</th></tr></thead>
                 <tbody>
                   {draft.services.map((s, i) => (
                     <tr key={s.name}>
                       <td className="mono">{s.name}{(s.facts || s.runs_on) && <span className="field-hint fact-line" title={`Worked out by Overwatch, not written by anyone: ${s.facts || s.runs_on}`}>{s.facts || s.runs_on}</span>}</td>
-                      <td><input aria-label={`${s.name}: what it does`} className={clsx(s.what.startsWith("TODO") && "todo")} value={s.what} placeholder="e.g. takes orders, calls payments"
-                        onChange={(e) => update((d) => { d.services[i].what = e.target.value; })} /></td>
+                      <td><input aria-label={`${s.name}: what it does`} className={clsx(s.what.startsWith("TODO") && "todo", drafted[s.name] && "drafted")} value={s.what} placeholder="e.g. takes orders, calls payments"
+                        onChange={(e) => { edited(s.name); update((d) => { d.services[i].what = e.target.value; }); }} />
+                        {drafted[s.name] && <span className="draft-tag">AI draft: check it</span>}</td>
                       <td><input aria-label={`${s.name}: normal behaviour`} value={s.normal} placeholder="e.g. p95 under 100 ms"
                         onChange={(e) => update((d) => { d.services[i].normal = e.target.value; })} /></td>
                     </tr>

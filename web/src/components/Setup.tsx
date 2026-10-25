@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { toast } from "sonner";
 import { setupApi, type AiSettings, type Notifiers, type Plan, type SetupState, type WatchSettings } from "../api";
-import { AiEditor, ExternalsEditor, Field, NotificationsEditor, Section, Switch, WatchEditor } from "./SettingsParts";
+import { AiEditor, ExternalsEditor, Field, NotificationsEditor, Section, Switch, WatchEditor, DraftButton } from "./SettingsParts";
 import { SystemMap } from "./SystemMap";
 
 const STEPS = [
@@ -33,6 +33,8 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
   const [watch, setWatch] = useState<Partial<WatchSettings>>(DEFAULT_WATCH);
   const [approval, setApproval] = useState<"manual" | "auto">("manual");
   const [busy, setBusy] = useState(false);
+  const [drafted, setDrafted] = useState<Record<string, boolean>>({}); // fields an AI wrote and nobody has edited yet
+  const edited = (key: string) => setDrafted((x) => (x[key] ? { ...x, [key]: false } : x));
   const [saving, setSaving] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [yaml, setYaml] = useState("");
@@ -233,18 +235,36 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
           <Section title="Describe it" description="What an engineer would tell a newcomer. It helps the investigation more than anything else. Fields marked in amber still need you.">
             <div className="field-grid">
               <Field label="The system" wide>
-                <textarea rows={3} className={clsx(todo(plan.system.description) && "todo")} value={plan.system.description}
-                  onChange={(e) => updatePlan((p) => { p.system.description = e.target.value; })} />
+                <textarea rows={3} className={clsx(todo(plan.system.description) && "todo", drafted.__system && "drafted")} value={plan.system.description}
+                  onChange={(e) => { edited("__system"); updatePlan((p) => { p.system.description = e.target.value; }); }} />
+                {drafted.__system && <span className="draft-tag">AI draft: check it</span>}
               </Field>
             </div>
+            <DraftButton
+              build={() => ({
+                system: plan.system,
+                services: Object.entries(plan.services).map(([name, f]) => ({ name, what: f.what ?? "", runs_on: plan.service_facts?.[name] || f.runs_on, image: f.image })),
+                topology: plan.topology,
+                checks: plan.checks.map((c) => ({ name: c.name, service: c.service })),
+                ai: { base_url: ai.base_url, api_key: ai.api_key, model: ai.model, triage_model: ai.triage_model },
+              })}
+              apply={(r) => {
+                const keys: Record<string, boolean> = {};
+                Object.keys(plan.services).forEach((n) => { if (r.services[n]) keys[n] = true; });
+                if (r.system) keys.__system = true;
+                updatePlan((p) => { Object.keys(p.services).forEach((n) => { if (r.services[n]) p.services[n] = { ...p.services[n], what: r.services[n] }; }); if (r.system) p.system.description = r.system; });
+                setDrafted((x) => ({ ...x, ...keys }));
+                return Object.keys(keys).length;
+              }} />
             <table className="s-table">
               <thead><tr><th>Service</th><th>What it does</th></tr></thead>
               <tbody>
                 {Object.entries(plan.services).map(([name, facts]) => (
                   <tr key={name}>
                     <td className="mono">{name}{(plan.service_facts?.[name] || facts.runs_on) && <span className="field-hint fact-line" title={`Worked out by Overwatch, not written by anyone: ${plan.service_facts?.[name] || facts.runs_on}`}>{plan.service_facts?.[name] || facts.runs_on}</span>}</td>
-                    <td><input aria-label={`${name}: what it does`} className={clsx(todo(facts.what ?? "") && "todo")} value={facts.what ?? ""}
-                      onChange={(e) => updatePlan((p) => { p.services[name] = { ...p.services[name], what: e.target.value }; })} /></td>
+                    <td><input aria-label={`${name}: what it does`} className={clsx(todo(facts.what ?? "") && "todo", drafted[name] && "drafted")} value={facts.what ?? ""}
+                      onChange={(e) => { edited(name); updatePlan((p) => { p.services[name] = { ...p.services[name], what: e.target.value }; }); }} />
+                      {drafted[name] && <span className="draft-tag">AI draft: check it</span>}</td>
                   </tr>
                 ))}
               </tbody>
