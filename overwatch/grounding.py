@@ -151,13 +151,24 @@ def check(incident: Incident, known_text: str) -> dict[str, Any]:
         json.dumps([e.rows for e in incident.pack], default=str),
         json.dumps([e.rows for e in incident.evidence], default=str),
     ]))
+    claim_gaps = []
     for label, claim, support in _STATE_CLAIMS:
         if claim.search(incident.root_cause.lower()) and not support.search(results):
             unsupported.append(label)
+            claim_gaps.append(label)
 
     total = len(cited)
     score = (verified / total) if total else 0.0
     ok = total > 0 and score >= 0.6 and not unsupported
+    # How far a poorly grounded diagnosis may be trusted. Quotes that are not in the data, or a state claim nothing
+    # shows ("the container was unhealthy"), are the serious failures. When every quote checks out and only an extra
+    # term is unsupported (a word the model inferred, like "DNS" from a lookup error), that is a lighter doubt.
+    if ok:
+        cap = 1.0
+    elif total == 0 or score < 1.0 or claim_gaps:
+        cap = 0.6
+    else:
+        cap = 0.8 if len(unsupported) == 1 else 0.7
     return {
         "verified": verified,
         "total": total,
@@ -165,4 +176,5 @@ def check(incident: Incident, known_text: str) -> dict[str, Any]:
         "unsupported_terms": unsupported,
         "score": round(score, 2),
         "ok": ok,
+        "cap": cap,
     }

@@ -24,7 +24,7 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
   const [project, setProject] = useState(state.docker_projects[0] ?? "");
   const [serviceLabel, setServiceLabel] = useState("");
   const [useK8s, setUseK8s] = useState(state.kubernetes_in_cluster);
-  const [k8s, setK8s] = useState({ url: "", token: "", namespace: "", service_label: "" });
+  const [k8s, setK8s] = useState({ url: "", token: "", namespace: "", service_label: "", ca_file: "", skip_tls: false });
   const [loki, setLoki] = useState({ url: "", tenant: "", token: "" });
   const [prometheus, setPrometheus] = useState("");
   const [databases, setDatabases] = useState<{ name: string; url: string }[]>([{ name: "", url: "" }]);
@@ -144,6 +144,12 @@ export function Setup({ state, onCancel }: { state: SetupState; onCancel?: () =>
                     <Field label="API server"><input value={k8s.url} onChange={(e) => setK8s({ ...k8s, url: e.target.value })} placeholder="https://my-cluster:6443" /></Field>
                     <Field label="Token" hint="A service account token. Stored in .env.">
                       <input type="password" autoComplete="off" value={k8s.token} onChange={(e) => setK8s({ ...k8s, token: e.target.value })} />
+                    </Field>
+                    <Field label="Cluster CA certificate" hint="Optional. Path to the cluster's CA file, when its certificate is not publicly signed (local, on-prem and many managed clusters).">
+                      <input value={k8s.ca_file} disabled={k8s.skip_tls} onChange={(e) => setK8s({ ...k8s, ca_file: e.target.value })} placeholder="/path/to/ca.crt" />
+                    </Field>
+                    <Field label="Certificate check" hint="A last resort for a cluster whose CA you do not have. Traffic is still encrypted, but the server is not verified.">
+                      <Switch checked={k8s.skip_tls} onChange={(v) => setK8s({ ...k8s, skip_tls: v })} label="Skip certificate verification" />
                     </Field>
                   </>
                 )}

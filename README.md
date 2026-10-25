@@ -336,7 +336,7 @@ Overwatch does not plug into your services. It reads the data they already produ
 | One bad replica of a service | per-instance metrics |
 | The wrong suspect | a service that only looks guilty because it is the one that reports the error (the blast radius separates *cause*, *affected* and *at risk*) |
 
-**What is verified.** The 18 injectable faults in the demo shop are all caught by the Watcher (see [section 11](#11-the-demo-system-and-its-19-faults) and `eval/fault-verification.md`; `service_down` was checked in live runs). Slow query, bad deploy, lock contention and a wrong timeout were also diagnosed correctly and graded by hand on the demo shop. On a second, real Docker Compose app (a URL shortener) these were run live: a killed Redis, a killed and a paused Postgres, slow queries, and connection exhaustion. Kubernetes and Loki are implemented but have not yet been run against a real cluster. There is no accuracy benchmark across all faults yet.
+**What is verified.** The 18 injectable faults in the demo shop are all caught by the Watcher (see [section 11](#11-the-demo-system-and-its-19-faults) and `eval/fault-verification.md`; `service_down` was checked in live runs). Slow query, bad deploy, lock contention and a wrong timeout were also diagnosed correctly and graded by hand on the demo shop. On a second, real Docker Compose app (a URL shortener) these were run live: a killed Redis, a killed and a paused Postgres, slow queries, and connection exhaustion. Kubernetes was run live on a local k3d cluster (a healthy web tier, a chatty API, and a crash-looping worker): discovery found all three services, the worker's check failed, and the investigator read its logs, pods and events and diagnosed the crash loop correctly (it cannot reach `db:5432`, which was never deployed). Loki was run live too: discovery found its services and the generated error-rate checks returned real counts. Reproduce both with `PYTHON=.venv/bin/python scripts/k8s-smoke/run.sh` (needs docker, k3d and kubectl; it creates a throwaway cluster and Loki, checks them, and removes them). There is no accuracy benchmark across all faults yet.
 
 The more of this you connect, the better the investigations. You do not need a logs table or a metrics table: Docker, Kubernetes and Loki are read directly from their own APIs.
 
@@ -376,7 +376,7 @@ You do not have to write the configuration by hand. Tell Overwatch **where thing
 overwatch run          # no overwatch.yaml here yet -> the console opens on "Connect your system"
 ```
 
-1. **Connect:** pick where your services run: Docker (detected automatically; choose the Compose project), a Kubernetes cluster (the service account is used inside a cluster; outside, give the API server and a token) and/or Loki for logs. Optionally add a Prometheus address and any databases; choose an AI provider (one click fills Nightshift or NVIDIA) and **Test connection**.
+1. **Connect:** pick where your services run: Docker (detected automatically; choose the Compose project), a Kubernetes cluster (the service account is used inside a cluster; outside, give the API server and a token, and the cluster's CA file if its certificate is not publicly signed, which is normal for local, on-prem and many managed clusters; a switch skips certificate verification as a last resort) and/or Loki for logs. Optionally add a Prometheus address and any databases; choose an AI provider (one click fills Nightshift or NVIDIA) and **Test connection**.
 2. **Review system:** a map of the discovered system, the **external services** it found (add, rename or remove them; set a status URL and the error text to watch for), a sentence per service to fill in (amber fields help the Investigator most).
 3. **Checks & alerts:** the proposed checks with a reason for each (switch any off), the evidence pack, **notifications** (Slack, Jira, webhook), watch timings and approval mode, and a preview of the file it will write. **Save and start watching** writes the files and starts immediately, no restart; an existing config is kept as a backup.
 
@@ -543,6 +543,7 @@ sources:
     since_minutes: 15            # window for log-line queries
   cluster:
     type: kubernetes             # pods, logs, events, rollouts straight from the API server
+    # verify: /path/to/ca.crt    # the cluster's CA, if its certificate is not publicly signed (false skips the check)
     namespace: shop              # inside a cluster, the pod's service account and namespace are used
     # outside a cluster:  url: https://api.example.com:6443   token: ${K8S_TOKEN}
     service_label: app           # label naming a service (default: app.kubernetes.io/name, then app)
@@ -673,7 +674,7 @@ impact:
 | Key | Default | Meaning |
 |---|---|---|
 | `interval_seconds` | `30` | How often the Watcher runs every check |
-| `cooldown_seconds` | `600` | A check cannot open a new incident again within this window (flap protection) |
+| `cooldown_seconds` | `600` | A flapping check cannot open a new incident again within this window. A check that stayed healthy for the whole recovery period first is a new problem and is not held back |
 | `merge_window_seconds` | `300` | New alerts join an incident opened this recently instead of opening another |
 | `resolve_after_seconds` | `60` | An incident recovers once all its checks stay healthy this long |
 | `max_parallel_investigations` | `2` | Worker pool size |
@@ -1003,7 +1004,7 @@ stateDiagram-v2
 ```
 
 - **Merging:** alerts that fire within `merge_window_seconds` of an open incident join it.
-- **Flap protection:** recovery requires the checks to stay healthy for the whole `resolve_after_seconds`; a single bad sample resets the clock. A check cannot reopen an incident within `cooldown_seconds`.
+- **Flap protection:** recovery requires the checks to stay healthy for the whole `resolve_after_seconds`; a single bad sample resets the clock. A check that flaps cannot reopen an incident within `cooldown_seconds`; one that stayed healthy for the whole recovery period and then broke again is a new problem and opens a new incident straight away.
 - **Reported problems** (typed in the console or `overwatch investigate`) have no check to watch, so they close only when a person clicks **Mark resolved**.
 - **Restarts:** incidents are stored in SQLite and reloaded; an investigation interrupted by a restart is marked failed. Check history is in memory, so recovery timing restarts with the process.
 
@@ -1074,7 +1075,7 @@ Register it in `SOURCE_TYPES` in `overwatch/sources/__init__.py`.
 
 - **AI accuracy is not yet benchmarked.** Detection is verified for every fault; diagnosis has only been spot-checked. The model's confidence is self-reported, not calibrated.
 - **Memory recall is weak.** The Historian searches with text built from alert names, which rarely matches the wording of past tickets, so H-MEM often returns nothing even for a known problem. The H-MEM reference also uses a hash-based embedder and JSON-file storage; Meterless itself describes it as not a production library.
-- **Connectors:** SQL databases, Prometheus, Docker, Kubernetes and Loki. The Kubernetes and Loki sources and their discovery are tested against recorded API responses, not a live cluster. Elasticsearch, Datadog and CloudWatch are not covered yet.  Both are found by discovery and the setup page (Kubernetes: services from labels, dependencies from environment values that name another service, a liveness check per service; Loki: services from its labels, an error-rate check per service).
+- **Connectors:** SQL databases, Prometheus, Docker, Kubernetes and Loki. The Kubernetes and Loki sources and their discovery are tested against recorded API responses and were also run live (a k3d cluster and a real Loki); not yet tried on a managed cloud cluster or with authentication on Loki. Elasticsearch, Datadog and CloudWatch are not covered yet.  Both are found by discovery and the setup page (Kubernetes: services from labels, dependencies from environment values that name another service, a liveness check per service; Loki: services from its labels, an error-rate check per service).
 - **Zetaris is unverified end to end:** the JDBC source, registration statements and Spark SQL generation follow Zetaris's documentation and are tested against a fake connection only.
 - **No distributed tracing** (e.g. OpenTelemetry); the Investigator reasons from aggregates and logs.
 - **History in memory:** relative baselines cover ~30 minutes and restart with the process.

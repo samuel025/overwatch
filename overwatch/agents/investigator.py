@@ -48,6 +48,9 @@ How to work:
   service stopped, say that the trigger is unknown rather than picking the nearest change.
 - Only state facts that appear in the context or in query results. Never assume infrastructure, tools or
   mechanisms you were not told about (for example, do not assume Kubernetes, load balancers or probes).
+- Describe impact only as far as the data shows it. Say a service "failed", "was starved" or "was degraded" only when a
+  check, metric or log line says so; if the data only shows the cause (a stopped database, say), write that the
+  dependents "may be affected" or are "at risk", and name which of them show errors.
 - Work as a differential diagnosis: keep 2-3 candidate causes in mind and look for evidence that would rule
   each one in or out.
 - There can be more than one independent cause. If so, name each one.
@@ -76,7 +79,7 @@ or, when the evidence is sufficient:
 Every claim in root_cause must be backed by an item in "evidence"; quotes are checked against the data."""
 
 
-CRITIC_SECONDS = 25   # optional extras never hold up the diagnosis: one attempt, this long
+CRITIC_SECONDS = 40   # optional extras never hold up the diagnosis: one attempt, this long
 TRIAGE_SECONDS = 45
 
 CRITIC_PROMPT = """You check a diagnosis against the data it was based on. You do not diagnose.
@@ -293,12 +296,13 @@ class Investigator:
         """Check the conclusion against the data; a poorly grounded diagnosis cannot claim high confidence."""
         result = grounding.check(incident, self.known_text() + " " + " ".join(timeline or []))
         incident.grounding = result
-        if not result["ok"] and incident.confidence > 0.6:
+        cap = result.get("cap", 0.6)
+        if not result["ok"] and incident.confidence > cap:
             incident.reasoning.append(
-                f"Confidence capped at 60% (was {incident.confidence:.0%}): {result['verified']}/{result['total']} "
+                f"Confidence capped at {cap:.0%} (was {incident.confidence:.0%}): {result['verified']}/{result['total']} "
                 f"quotes verified, not found in the data: {', '.join(result['unsupported_terms']) or 'none'}"
             )
-            incident.confidence = 0.6
+            incident.confidence = cap
         self._cap_by_suspect(incident, timeline or [])
         guess = incident.first_guess_verdict
         if incident.hypothesis.get("text") and guess.get("verdict") == "disagree" and not str(guess.get("why", "")).strip():

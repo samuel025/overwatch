@@ -446,9 +446,19 @@ class Overwatch:
             if on_update:
                 on_update(inc)
 
-        if self.investigator.triage(incident, timeline):
-            self.refresh_spread(incident)  # the first guess may name the origin
-            self._save(incident)
+        def first_guess() -> None:
+            try:
+                if self.investigator.triage(incident, timeline):
+                    self.refresh_spread(incident)  # the first guess may name the origin
+                    self._save(incident)
+            except Exception as e:  # the first guess is an extra; never a reason to stop
+                incident.reasoning.append(f"fast first guess failed: {e}")
+
+        # The fast model usually answers in seconds and then informs the deep investigation. When the provider is slow it
+        # must not hold the investigation back: wait a short while, then go on, and show the guess whenever it arrives.
+        guess = threading.Thread(target=first_guess, name="first-guess", daemon=True)
+        guess.start()
+        guess.join(self.TRIAGE_GRACE_SECONDS)
         self.investigator.investigate(incident, on_step=step, timeline=timeline)
         incident.reasoning.append(f"Investigation took {time.monotonic() - started:.1f}s")
         if incident.status == "investigating":  # "failed" stays failed: there is nothing to approve
@@ -646,13 +656,16 @@ class Overwatch:
                     self._healed_at[c.name] = now
 
     def _covered(self, a: Anomaly) -> bool:
-        """Already part of an ongoing incident, or reopened too soon after one (flap protection)."""
+        """Already part of an ongoing incident, or flapping: back too soon without ever having stayed healthy."""
         with self.lock:
             healed = self._healed_at.get(a.check, 0.0)
             if any(a.check in {x.check for x in i.anomalies}
                    and self._opened_precisely.get(i.id, float(_ts(i.opened_at))) > healed for i in self._active()):
                 return True
-            return time.time() - self.last_opened.get(a.check, 0) < self.cfg.cooldown_seconds
+            last = self.last_opened.get(a.check, 0)
+            if healed > last:  # healthy for the whole recovery period since it last alerted: a new problem, not a flap
+                return False
+            return time.time() - last < self.cfg.cooldown_seconds
 
     def _merge_target(self) -> Incident | None:
         """The newest ongoing incident opened within the merge window: a cascade is one incident, not five."""
@@ -661,6 +674,7 @@ class Overwatch:
         return max(recent, key=lambda i: i.opened_at) if recent else None
 
     MAX_REFRESHES = 2
+    TRIAGE_GRACE_SECONDS = 20  # how long the deep investigation waits for the fast first guess
 
     def _reinvestigate(self, incident: Incident) -> None:
         """New checks fired after a diagnosis was made but before anyone acted on it: the diagnosis (and the evidence

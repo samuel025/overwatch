@@ -84,7 +84,7 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
 
     zetaris: this deployment's data layer is Zetaris, so databases are registered there and the generated
     checks and evidence are Spark SQL over <name>.<table>, not direct connections.
-    kubernetes: {"url", "token", "namespace", "service_label"} (all optional in a cluster) or None to skip.
+    kubernetes: {"url", "token", "namespace", "service_label", "verify"} (all optional in a cluster) or None to skip.
     loki: {"url", "tenant", "token"} or None to skip."""
     plan: dict[str, Any] = {
         "system": {"name": "my-system", "description": ""}, "docker": {}, "services": {}, "runtime_facts": "",
@@ -123,7 +123,8 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
     if kubernetes is not None:
         try:
             k = discover_kubernetes(kubernetes.get("url", ""), kubernetes.get("token", ""),
-                                    kubernetes.get("namespace", ""), kubernetes.get("service_label", ""))
+                                    kubernetes.get("namespace", ""), kubernetes.get("service_label", ""),
+                                    verify=kubernetes.get("verify", True))
             plan["sources"]["k8s"] = k["source"]
             plan["kubernetes"] = {"namespace": k["namespace"]}
             for svc, facts in k["services"].items():

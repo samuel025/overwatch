@@ -499,3 +499,19 @@ def test_historian_asks_memory_with_raw_check_names_a_capped_context_and_a_lower
     assert "event:postgres_down" in seen["symptoms"] and "event:postgres down" in seen["symptoms"]  # both spellings match memory text
     assert "noise" not in seen["symptoms"]  # evidence text from the first seconds of an outage is left out of the search
     assert seen["threshold"] == Historian.THRESHOLD < .35  # below the engine default
+
+
+def test_one_inferred_term_with_every_quote_verified_is_a_lighter_doubt_than_a_missing_quote():
+    src = FakeSource({"containers": [{"instance": "orders", "status": "exited"}]})
+    q = {"action": "query", "source": "db", "query": "select * from containers", "purpose": "state"}
+    def run(root_cause, quote):
+        reply = {"action": "conclude", "root_cause": root_cause, "confidence": 0.98, "evidence": [{"step": 1, "quote": quote}]}
+        inc = Incident(anomalies=[Anomaly("c", "orders", 1, 0, ">", "")])
+        Investigator(make_config(), ScriptedLLM([q, reply]), {"db": src}).investigate(inc)
+        return inc
+    one_term = run("The orders container exited, so the DNS lookup failed.", "exited")          # quote verified, 'DNS' not in data
+    two_terms = run("The orders container exited: a DNS and TLS problem followed.", "exited")
+    missing = run("The orders container exited.", "probe failed")                                # the quote is not in the data
+    assert one_term.grounding["cap"] == 0.8 and one_term.confidence == 0.8
+    assert two_terms.grounding["cap"] == 0.7 and two_terms.confidence == 0.7
+    assert missing.grounding["cap"] == 0.6 and missing.confidence == 0.6

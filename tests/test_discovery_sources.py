@@ -98,3 +98,35 @@ def test_full_plan_renders_a_config_that_loads(tmp_path, monkeypatch):
     cfg = load_config(path)
     assert {c.name for c in cfg.checks} >= {"orders_running", "payments_log_errors"}
     assert cfg.topology["gateway"] == ["orders"]
+
+
+def test_a_cluster_with_its_own_certificate_authority_can_be_connected_and_the_choice_is_saved():
+    # no verify given: the system CAs are used, and nothing extra is written to the config
+    d = discover_kubernetes(url="https://api", namespace="shop", transport=httpx.MockTransport(k8s_handler))
+    assert "verify" not in d["source"]
+    # a CA file or "skip": both reach the source block, which is what the running Overwatch reads
+    import certifi  # a real CA bundle to point at: the HTTP client loads the file it is given
+    ca = discover_kubernetes(url="https://api", namespace="shop", transport=httpx.MockTransport(k8s_handler), verify=certifi.where())
+    assert ca["source"]["verify"] == certifi.where()
+    skip = discover_kubernetes(url="https://api", namespace="shop", transport=httpx.MockTransport(k8s_handler), verify=False)
+    assert skip["source"]["verify"] is False
+    plan = discover(docker=None, kubernetes={"url": "https://api", "namespace": "shop", "verify": False})  # via the wizard path
+    assert plan["errors"] and "kubernetes request failed" in plan["errors"][0]  # unreachable here, but it got that far
+
+
+def test_a_certificate_error_tells_the_user_how_to_fix_it():
+    def refuse(request):
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate")
+    try:
+        discover_kubernetes(url="https://api", namespace="shop", transport=httpx.MockTransport(refuse))
+    except RuntimeError as e:
+        assert "CA file" in str(e) and "certificate verification" in str(e)
+    else:
+        raise AssertionError("expected an error")
+
+
+def test_the_setup_form_turns_ca_and_skip_into_one_verify_setting():
+    from overwatch.server import KubernetesIn
+    assert KubernetesIn().verify() is True
+    assert KubernetesIn(ca_file=" /etc/ca.crt ").verify() == "/etc/ca.crt"
+    assert KubernetesIn(ca_file="/etc/ca.crt", skip_tls=True).verify() is False  # skipping wins

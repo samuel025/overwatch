@@ -600,3 +600,61 @@ def test_who_is_at_risk_shows_while_the_investigation_is_still_running(world):
     assert wait_for(lambda: inc.status == "awaiting_approval")
     assert inc.blast_radius["at_risk"] == ["a"]  # and it is still right once the diagnosis is in
     ow.stop()
+
+
+def test_a_real_relapse_after_recovery_opens_a_new_incident_despite_the_cooldown(world):
+    make, set_value = world
+    ow = make(cooldown_seconds=600, merge_window_seconds=0)  # healed at once: resolve_after_seconds is 0
+    set_value("a", 50)
+    first = ow.check_once()
+    assert wait_for(lambda: first.status == "awaiting_approval")
+    set_value("a", 1)
+    for _ in range(3):
+        ow.check_once()
+    assert first.recovered_at  # it recovered and stayed healthy
+    set_value("a", 50)  # and now it breaks again, well inside the 10-minute cooldown
+    second = None
+    for _ in range(3):
+        second = ow.check_once() or second
+    assert second is not None and second is not first and len(ow.incidents) == 2
+    ow.stop()
+
+
+def test_a_flapping_check_is_still_held_back_by_the_cooldown(world):
+    make, set_value = world
+    ow = make(cooldown_seconds=600, resolve_after_seconds=3600, merge_window_seconds=0)  # never stays healthy long enough
+    set_value("a", 50)
+    first = ow.check_once()
+    assert wait_for(lambda: first.status == "awaiting_approval")
+    set_value("a", 1); ow.check_once()
+    set_value("a", 50)
+    for _ in range(3):
+        assert ow.check_once() is None  # a flap: no second incident
+    assert len(ow.incidents) == 1
+    ow.stop()
+
+
+def test_a_slow_first_guess_does_not_hold_up_the_investigation_and_still_appears_when_it_arrives(world):
+    import threading
+    make, set_value = world
+    ow = make()
+    ow.cfg.llm.triage_model = "fast-model"
+    ow.TRIAGE_GRACE_SECONDS = 0.2
+    release = threading.Event()
+
+    class Scripted:
+        def chat_json(self, messages, model, agent, **_):
+            if agent == "triage":
+                release.wait(5)  # the provider is slow
+                return {"hypothesis": "late guess", "confidence": 0.5}
+            return {"action": "conclude", "root_cause": "The a service failed.", "confidence": 0.9}
+
+    ow.investigator.llm = Scripted()
+    set_value("a", 50)
+    started = time.time()
+    inc = ow.handle(ow.watcher.run())
+    assert wait_for(lambda: inc.status == "awaiting_approval") and time.time() - started < 3  # not held for 5 s
+    assert not inc.hypothesis.get("text")
+    release.set()
+    assert wait_for(lambda: inc.hypothesis.get("text") == "late guess")  # and the guess shows up when it arrives
+    ow.stop()

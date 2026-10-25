@@ -16,16 +16,23 @@ _HOSTS = re.compile(r"\b[a-z][a-z0-9+.-]*://(?:[^\s/@]*@)?([a-z0-9][a-z0-9.-]*)"
 
 
 def discover_kubernetes(url: str = "", token: str = "", namespace: str = "", service_label: str = "",
-                        name: str = "k8s", transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
+                        name: str = "k8s", transport: httpx.BaseTransport | None = None,
+                        verify: bool | str = True) -> dict[str, Any]:
+    """`verify`: True (system CAs), a path to the cluster's CA file, or False (skip certificate checks)."""
     cfg: dict[str, Any] = {k: v for k, v in {"url": url, "token": token, "namespace": namespace or None,
                                               "service_label": service_label}.items() if v}
+    cfg["verify"] = verify
     src = KubernetesSource(name, cfg)
     if transport is not None:
         src.client = httpx.Client(base_url=src.client.base_url, transport=transport)
     try:
         pods = src.pods()
     except SourceError as e:
-        raise RuntimeError(str(e)) from e
+        msg = str(e)
+        if "CERTIFICATE_VERIFY_FAILED" in msg:
+            msg += (". The cluster's certificate is not signed by a CA this machine trusts (normal for local, on-prem and "
+                    "many managed clusters). Give Overwatch the cluster's CA file, or switch off certificate verification.")
+        raise RuntimeError(msg) from e
     if not pods:
         raise RuntimeError(f"no pods found in namespace '{src.namespace}'")
 
@@ -96,6 +103,7 @@ def discover_kubernetes(url: str = "", token: str = "", namespace: str = "", ser
         "topology": {k: sorted(v) for k, v in topology.items()}, "checks": checks, "runtime_facts": runtime_facts,
         "notes": [], "env_hits": env_hits, "log_hits": log_hits,
         "internal": sorted(h.lower() for h in internal if h),
-        "source": {k: v for k, v in {"type": "kubernetes", "url": url, "token": token, "namespace": src.namespace,
-                                     "service_label": service_label}.items() if v},
+        "source": {**{k: v for k, v in {"type": "kubernetes", "url": url, "token": token, "namespace": src.namespace,
+                                        "service_label": service_label}.items() if v},
+                   **({"verify": verify} if verify is not True else {})},
     }

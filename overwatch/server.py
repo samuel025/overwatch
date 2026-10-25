@@ -59,6 +59,11 @@ class KubernetesIn(BaseModel):
     token: str = ""
     namespace: str = ""
     service_label: str = ""
+    ca_file: str = ""       # the cluster's CA certificate, when its certificate is not publicly signed
+    skip_tls: bool = False  # last resort: do not verify the certificate
+
+    def verify(self) -> bool | str:
+        return False if self.skip_tls else (self.ca_file.strip() or True)
 
 
 class LokiIn(BaseModel):
@@ -197,7 +202,7 @@ def create_app(ow: Overwatch | None, watch: bool = True, token: str | None = Non
         plan = discover(docker, body.prometheus_url.strip(), {d.name.strip(): d.url.strip() for d in body.databases
                                                             if d.name.strip() and d.url.strip()},
                         zetaris=bool(zetaris_env()),
-                        kubernetes=body.kubernetes.model_dump() if body.kubernetes.enabled else None,
+                        kubernetes={**body.kubernetes.model_dump(exclude={'ca_file', 'skip_tls'}), 'verify': body.kubernetes.verify()} if body.kubernetes.enabled else None,
                         loki=body.loki.model_dump() if body.loki.url.strip() else None)
         text, _ = render(plan)
         return {"plan": plan, "yaml": text}
