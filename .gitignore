@@ -11,3 +11,6 @@ overwatch-memory.jsonl
 dist/
 !overwatch/ui/dist/
 .claude/
+
+# personal runbook
+SHORTENER_DEMO.md

@@ -103,13 +103,15 @@ def draft(llm_cfg: LLMConfig, system: dict[str, Any], services: list[dict[str, A
                 {"role": "user", "content": f"System name: {system.get('name') or 'unnamed'}\n\nFacts about every service:\n{facts}\n\n" + " ".join(ask)}]
     client = llm or LLM(llm_cfg, trace_dir=tempfile.mkdtemp(prefix="overwatch-draft-"))
     last: Exception | None = None
-    for model, patience in ((llm_cfg.triage_model, 25), (llm_cfg.summary_model or llm_cfg.investigator_model, 90)):
+    # The main model first: on a hosted API the "fast" model was often the slower one (138 s against 24 s for the main one in
+    # a measured run), and a wait here is a person watching a spinner. The fast model is the fallback.
+    for model, patience in ((llm_cfg.summary_model or llm_cfg.investigator_model, 75), (llm_cfg.triage_model, 45)):
         if not model:
             continue
         try:
-            reply = client.chat_json(messages, model, agent="draft", patience=patience)
+            reply = client.chat_json(messages, model, agent="draft", retries=1, patience=patience)
             break
-        except LLMError as e:  # the fast model may be slow today: the main one gets a longer turn
+        except LLMError as e:  # the main model may be down or slow: the other one gets a turn
             last = e
     else:
         raise LLMError(f"could not draft: {last}" if last else "no AI model is configured")

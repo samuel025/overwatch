@@ -59,11 +59,11 @@ def test_nothing_missing_means_no_model_call():
     assert llm.calls == []
 
 
-def test_a_slow_fast_model_falls_back_to_the_main_model_and_a_total_failure_is_an_error():
+def test_the_main_model_writes_the_draft_and_the_fast_one_is_the_fallback_and_a_total_failure_is_an_error():
     llm = Scripted([LLMError("timed out"), {"system": "", "services": {"api": "Application that calls postgres."}}])
     out = draft(CFG, {"name": "s", "description": "ok"}, SERVICES[:1], TOPOLOGY, CHECKS, llm=llm)
     assert out["services"] == {"api": "Application that calls postgres."}
-    assert [c[0] for c in llm.calls] == ["fast", "deep"]
+    assert [c[0] for c in llm.calls] == ["deep", "fast"]
     with pytest.raises(LLMError):
         draft(CFG, {"name": "s", "description": "ok"}, SERVICES[:1], TOPOLOGY, CHECKS, llm=Scripted([LLMError("a"), LLMError("b")]))
 
