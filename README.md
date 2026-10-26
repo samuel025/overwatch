@@ -101,6 +101,8 @@ flowchart LR
 
 About 15 minutes once Zetaris is installed. Installing Zetaris is the long part (a 4 GB download and a 5 to 10 minute first start), so start it first.
 
+You do not need a system of your own to try Overwatch: this quick start runs a bundled demo shop (`examples/demo-system/`) that you can break on purpose with one command, and Overwatch diagnoses it.
+
 | Tool | Version | Used for |
 |---|---|---|
 | Python | 3.11+ | Overwatch itself |
@@ -190,6 +192,8 @@ cd examples/demo-system
 ```
 
 Within ~30 seconds the banner turns amber and `orders` and `gateway` go red on the map; in a minute or two the diagnosis appears with an *Approve & send report* button. About a minute after the reset, the incident turns green: *Recovered*. `scripts/tour.py` shows several faults in a row.
+
+You can also describe a problem yourself: type something like `checkout feels slow` or `payments are failing` into the **Report a problem** box at the top of the console and click **Investigate**. Overwatch investigates it the same way, without waiting for a check to fire.
 
 **The console:** a live map of your system (drag the services; positions are remembered), the four agents' status, every signal with a sparkline, and the incident view: *What happened*, *Why* (with confidence), *Impact*, *What to do*, the explanations considered, the evidence relied on, and *How Overwatch figured it out* (each step with its query and result rows). *Under the hood* shows the data sources, memory and AI calls. **Settings** edits the configuration without a restart.
 
@@ -392,5 +396,5 @@ PLAN.md                    hackathon plan and schedule
 ## 10. Pre-existing code and licenses
 
 - `memory-service/src/hmem/` and `memory-service/conformance/` are vendored from the Meterless H-MEM reference implementation (Apache-2.0, https://github.com/Meterless/Meterless, commit `1742dec`). Overwatch's changes are listed in [`memory-service/src/hmem/NOTICE.md`](memory-service/src/hmem/NOTICE.md).
-- Open-source libraries: FastAPI, Uvicorn, SQLAlchemy, psycopg, httpx, PyYAML, the OpenAI Python client; React, Vite, Sonner, NumberFlow, zustand, clsx.
+- Open-source libraries: FastAPI, Uvicorn, SQLAlchemy, psycopg, httpx, PyYAML, the OpenAI Python client, JayDeBeApi (the optional Zetaris bridge); React, Vite, React Flow (`@xyflow/react`), Sonner, NumberFlow, zustand, clsx; the IBM Plex Sans and JetBrains Mono fonts (Fontsource). The demo shop uses OpenTelemetry (SDK, OTLP exporter, FastAPI and httpx instrumentation); the tracing demo runs Grafana Tempo, and the tests use fixtures recorded from Tempo and Jaeger.
 - Everything else was written during the HackOS 2026 build window.
