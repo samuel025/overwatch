@@ -32,7 +32,9 @@ _REST_VIEWS = "ow_views"  # SchemaStore container holding the flattened views th
 LANGUAGE = (
     "Zetaris Lightning SQL (Spark SQL). Tables are <datasource>.<table>, e.g. shopdb.orders; a query may join "
     "tables from different datasources. Time windows: current_timestamp() - INTERVAL 5 MINUTES. Use backticks "
-    "around odd identifiers. Discover with SHOW DATASOURCES."
+    "around odd identifiers. Discover with SHOW DATASOURCES. KNOWN FAULT: a WHERE that compares two columns "
+    "(WHERE a < b) returns every row; never do that. Count with sum(CASE WHEN a < b THEN 1 ELSE 0 END) instead "
+    "(comparing a column with a constant or an expression, and join conditions, are fine)."
 )
 
 
@@ -227,7 +229,7 @@ class ZetarisSource(DataSource):
         flow with the deployment's admin account; never reachable by agents (they only call query())."""
         done = []
         for s in statements:
-            if s.upper().startswith("CREATE DATASOURCE "):  # re-running setup must replace, not fail "already exists"
+            if s.upper().startswith("CREATE DATASOURCE ") and not s.upper().startswith("CREATE DATASOURCE VIEW "):  # re-running setup must replace, not fail "already exists"
                 try:
                     self._run("DROP DATASOURCE " + s.split()[2], None, timeout)
                 except SourceError:

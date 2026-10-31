@@ -224,10 +224,15 @@ def test_postgres_gets_a_connection_saturation_check_on_its_own_service(monkeypa
         plan = discovery.discover({"project": "shop"}, "", {"main": "postgresql://u:p@localhost:5433/db"}, zetaris=zet)
         check = next(c for c in plan["checks"] if c["name"] == "main_connections_used_pct")
         assert check["service"] == "postgres" and check["threshold"] == 85
-        assert check["source"] == ("main_live" if zet else "main")
+        assert check["source"] == ("main_live" if zet else "main")  # the Watcher keeps its direct path
         assert "max_connections" in check["query"]
         slow = next(c for c in plan["checks"] if c["name"] == "main_longest_query_seconds")
         assert slow["service"] == "postgres" and slow["source"] == check["source"] and "pg_stat_activity" in slow["query"]
+        if zet:  # the Investigator reads live sessions through Zetaris; the direct source is the Watcher's alone
+            assert plan["sources"]["main_live"]["internal"] is True
+            ev = next(e for e in plan["evidence"] if e["name"] == "a" and e["source"] == "zetaris")  # the fake also returns a direct copy
+            assert ev["source"] == "zetaris" and "FROM main.live_sessions" in ev["query"]
+            assert "main.live_locks" in plan["catalog"]
 
 
 def test_write_warning_only_for_accounts_that_can_change_data():
@@ -242,3 +247,138 @@ def test_write_warning_only_for_accounts_that_can_change_data():
     assert "can write to 3 tables" in rw and "pg_read_all_stats" in rw
     assert "can write to 1 table." in write_warning("db", {**base, "writable_tables": 1})  # singular
     assert "create objects" in write_warning("db", {**base, "can_create": True})
+
+
+# -- the Unified Semantic Layer and data quality rules --------------------------------------------------------------
+
+
+def test_usl_statements_make_a_container_and_business_views_and_join_prometheus_when_present():
+    base = datalayer.usl_statements()
+    assert base[0][1] == "CREATE SCHEMASTORE CONTAINER usl"
+    assert [n for n, _ in base[1:]] == ["check_health", "container_status", "quality_results", "incident_history", "change_impact"]
+    assert all("WITH CONTAINER usl AS" in sql for _, sql in base[1:])
+    joined = dict(datalayer.usl_statements("promql_abc123"))
+    assert "ow_views.promql_abc123" in joined["target_status"] and "overwatch.container_state" in joined["target_status"]
+
+
+def test_create_usl_runs_every_statement_and_survives_prometheus_being_down():
+    ran = []
+
+    class Fake:
+        def __init__(self, rest):
+            self.rest = rest
+
+        def _ensure_once(self, sql):
+            ran.append(sql)
+
+        def _plain(self, sql):
+            ran.append(sql)
+
+        def admin(self, statements, timeout=None):
+            ran.extend(statements)
+            return statements
+
+        def _rest_view(self, kind, expr):
+            if not self.rest.get("ok"):
+                raise SourceError("Prometheus is down")
+            return "promql_up1"
+
+    done = datalayer.create_usl(Fake({"prometheus": "http://p", "ok": True}))
+    assert done[0] == "usl" and "usl.target_status" in done and f"{datalayer.USL_NAMESPACE}.{datalayer.USL_NAME}" in done and len(ran) == 7 + len(datalayer.usl_object_statements())
+    ran.clear()
+    done = datalayer.create_usl(Fake({"prometheus": "http://p"}))
+    assert "usl.target_status" not in done and "usl.check_health" in done
+
+
+def test_quality_rules_come_from_column_names_and_count_breaking_rows_without_a_column_comparison_in_where(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "q.db"
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE urls (id TEXT, click_count INTEGER, created_at TIMESTAMP, expires_at TIMESTAMP);
+        CREATE TABLE notes (id INTEGER, body TEXT);
+        INSERT INTO urls VALUES ('a', 3, '2026-01-02', '2026-01-03'), ('b', -1, '2026-01-02', '2026-01-01'), ('c', 5, '2026-01-02', NULL);
+    """)
+    db.commit()
+    db.close()
+    found = discover_sql("shop", f"sqlite:///{path}")
+    rules = {c["name"]: c for c in found["checks"] if c["name"].startswith("dq_")}
+    assert set(rules) == {"dq_urls_click_count_negative", "dq_urls_expires_at_before_created"}
+    for c in rules.values():
+        assert c["threshold"] == 0 and c["every_seconds"] == 300
+        assert "WHERE" not in c["query"].split("FROM")[0] and " WHERE expires_at" not in c["query"]
+    db = sqlite3.connect(path)
+    assert db.execute(rules["dq_urls_click_count_negative"]["query"]).fetchone()[0] == 1
+    assert db.execute(rules["dq_urls_expires_at_before_created"]["query"]).fetchone()[0] == 1
+
+
+def test_a_slow_check_runs_in_the_background_and_the_watcher_pass_never_waits_for_it():
+    import threading
+    import time
+
+    from overwatch.agents.watcher import Watcher
+    from overwatch.config import CheckConfig
+
+    gate = threading.Event()
+
+    class Slow:
+        def query(self, q):
+            gate.wait(5)
+            return [{"value": 4}]
+
+    check = CheckConfig("dq_x", "db", "select", threshold=0, service="svc", every_seconds=300)
+    w = Watcher([check], {"db": Slow()})
+    started = time.time()
+    assert w.run() == []  # no result yet: nothing fires and the pass returns at once
+    assert time.time() - started < 1
+    gate.set()
+    for _ in range(50):
+        time.sleep(0.05)
+        if (found := w.run()):
+            break
+    assert [a.check for a in found] == ["dq_x"] and found[0].value == 4
+
+
+def test_live_postgres_internals_become_datasource_views_in_zetaris(monkeypatch):
+    stmts = datalayer.live_view_statements("Shop DB")
+    assert [s.split()[3] for s in stmts] == ["live_sessions", "live_locks", "live_table_stats"]
+    assert all(s.startswith("CREATE DATASOURCE VIEW ") and " FROM shop_db AS SELECT " in s for s in stmts)
+    assert "pg_blocking_pids" in stmts[0] and "pg_locks" in stmts[1]
+
+    ran = []
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def admin(self, statements, timeout=None):
+            ran.extend(statements)
+            return statements
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(datalayer, "ZetarisSource", Fake)
+    datalayer.register({"shop": "postgresql://u:p@h/db", "legacy": "mysql://u:p@h/db", "overwatch": "postgresql://u:p@h/o"},
+                       {"jdbc_url": "x"})
+    views = [r for r in ran if r.startswith("CREATE DATASOURCE VIEW")]
+    assert len(views) == 3 and all("FROM shop AS" in v for v in views)  # not for MySQL, not for Overwatch's own database
+
+
+def test_admin_replaces_a_datasource_but_never_drops_one_when_creating_a_view(monkeypatch):
+    ran = []
+    src = ZetarisSource("z", {"jdbc_url": "jdbc:x", "driver_class": "x"})
+    monkeypatch.setattr(src, "_run", lambda sql, limit, timeout=None: ran.append(sql) or [])
+    src.admin(["CREATE DATASOURCE a OPTIONS ()", "CREATE DATASOURCE VIEW v FROM a AS SELECT 1"])
+    assert ran == ["DROP DATASOURCE a", "CREATE DATASOURCE a OPTIONS ()", "CREATE DATASOURCE VIEW v FROM a AS SELECT 1"]
+
+
+def test_the_governed_usl_is_compiled_once_then_every_table_is_activated():
+    stmts = datalayer.usl_object_statements()
+    compile_ = next(s for s in stmts if s.startswith("COMPILE USL"))
+    assert "IF NOT EXISTS incident_response DEPLOY NAMESPACE lightning.metastore.overwatch DDL" in compile_
+    assert "REFERENCES service(name)" in compile_ and compile_.count("CREATE TABLE") == 3
+    tables = [s.split()[3] for s in stmts if s.startswith("ACTIVATE USL TABLE")]
+    assert tables == ["lightning.metastore.overwatch.incident_response." + t for t in ("service", "incident", "change_event")]
+    assert stmts.index(compile_) < min(i for i, s in enumerate(stmts) if s.startswith("ACTIVATE"))

@@ -288,7 +288,11 @@ The user never configures Zetaris: they connect their systems on the setup page 
 | Docker containers: state, events, log lines | A bounded window is mirrored into that same Postgres (`overwatch.container_state`, `container_events`, `container_logs`) |
 | Prometheus and Loki | The Investigator writes `promql <expression>` or `logql <expression>`; Overwatch turns it into a Zetaris REST table plus a flattening view |
 
-So one query can join "payments per minute before and after each deploy", or a container restart with the log lines around it. The Watcher keeps a fast direct path for checks (monitoring should not depend on a heavier path); the Investigator is offered only Zetaris, plus live Postgres internals such as `pg_stat_activity`, which are not tables. Kubernetes and traces stay live API sources. Zetaris is reached over JDBC with its own driver (Java and the `zetaris` extra); only Overwatch's setup and startup run DDL, and agents can only run `SELECT`, `WITH`, `SHOW`, `DESCRIBE` and the `promql`/`logql` commands. Without the `ZETARIS_*` variables Overwatch starts in a `direct` development mode.
+So one query can join "payments per minute before and after each deploy", or a container restart with the log lines around it. The Watcher keeps a fast direct path for checks (monitoring should not depend on a heavier path); the Investigator is offered only Zetaris, including live Postgres internals such as `pg_stat_activity` and `pg_locks`, which reach it as Zetaris views (`<db>.live_sessions`, `<db>.live_locks`). Kubernetes and traces stay live API sources. Zetaris is reached over JDBC with its own driver (Java and the `zetaris` extra); only Overwatch's setup and startup run DDL, and agents can only run `SELECT`, `WITH`, `SHOW`, `DESCRIBE` and the `promql`/`logql` commands. Without the `ZETARIS_*` variables Overwatch starts in a `direct` development mode.
+
+**A semantic layer on top (the `usl` views).** At startup Overwatch also builds a Unified Semantic Layer in Zetaris: a SchemaStore container `usl` with business-named views, `usl.check_health`, `usl.container_status`, `usl.quality_results`, `usl.incident_history`, `usl.change_impact` (a release against what its service's checks did next), and `usl.target_status`, which joins Prometheus's live targets (through `promql`) with Docker container state from Overwatch's history in one statement. The Investigator is told to try them first. Live Postgres sessions and locks reach Zetaris the same way, as `<db>.live_sessions` and `<db>.live_locks` datasource views, so the Investigator's queries all go through Zetaris. It also compiles a governed Zetaris USL, `incident_response` (tables `service`, `incident`, `change_event`, with keys), which shows under Unified Semantic Layer in the Zetaris UI. The DDL is in `overwatch/datalayer.py` (`usl_statements`, `usl_object_statements`, `LIVE_VIEWS`).
+
+**Data quality rules.** Discovery turns column names into rules that count rows breaking them (a count, amount or price below zero; an `expires_at` or `updated_at` earlier than `created_at`). They run through Zetaris every 5 minutes in the background, show in the console as checks named `dq_*`, open an incident when a row breaks one, and their latest results are in `usl.quality_results`. One Zetaris fault is worked around: version 2.4.3 returns every row for a `WHERE` that compares two columns, so the rules count with `CASE` inside an aggregate, and the Investigator is told not to write that `WHERE`.
 
 ---
 
@@ -334,7 +338,7 @@ python verify_faults.py                                         # proves every f
 ## 7. Testing and results
 
 ```bash
-pytest                                       # 218 offline tests: no database, AI or memory service needed
+pytest                                       # 225 offline tests: no database, AI or memory service needed
 cd memory-service && npm run conformance     # the official H-MEM conformance suite
 PYTHON=.venv/bin/python scripts/k8s-smoke/run.sh   # real k3d cluster + real Loki (needs docker, k3d, kubectl)
 python eval/run_eval.py                      # the benchmark: every fault, memory on and off, graded against ground truth

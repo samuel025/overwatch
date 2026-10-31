@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import operator
 import statistics
+import threading
 import time
 from collections import deque
 
@@ -50,6 +51,7 @@ class Watcher:
         self.suspected: set[str] = set()  # breaching, not yet confirmed
         # check name -> (unix time, value) samples; feeds relative checks and the live charts
         self.history: dict[str, deque] = {c.name: deque(maxlen=history_size) for c in checks}
+        self._slow: dict[str, dict] = {}  # slow checks (every_seconds): last result of the background run
 
     def baseline(self, check: CheckConfig, now: float | None = None) -> float | None:
         """Median of this check's values from the baseline window, excluding the last two minutes."""
@@ -57,6 +59,24 @@ class Watcher:
         oldest = now - check.baseline_minutes * 60
         values = [v for t, v in self.history[check.name] if v is not None and oldest <= t < now - RECENT_SECONDS]
         return statistics.median(values) if len(values) >= MIN_BASELINE_SAMPLES else None
+
+    def _slow_value(self, c: CheckConfig, now: float) -> float | None:
+        """A slow check (a data quality rule that scans a table) runs in the background every `every_seconds`, so it
+        can never hold up the 5-second pass; the Watcher reads the latest result. No result yet: no value."""
+        st = self._slow.setdefault(c.name, {"started": None, "value": None, "running": False})
+        if not st["running"] and (st["started"] is None or now - st["started"] >= c.every_seconds):
+            st["running"], st["started"] = True, now
+
+            def run() -> None:
+                try:
+                    st["value"] = _first_number(self.sources[c.source].query(c.query))
+                except Exception:  # an unreadable table or a slow source: keep the last result, try again next time
+                    pass
+                finally:
+                    st["running"] = False
+
+            threading.Thread(target=run, daemon=True, name=f"slow-check-{c.name}").start()
+        return st["value"]
 
     @staticmethod
     def _probe(c: CheckConfig) -> float:
@@ -89,6 +109,8 @@ class Watcher:
                     value: float | None = self._probe(c)
                 elif c.kind == "container":
                     value = float(self.sources[c.source].running(c.service))
+                elif c.every_seconds:
+                    value = self._slow_value(c, now)
                 else:
                     value = _first_number(self.sources[c.source].query(c.query))
             except SourceError as e:

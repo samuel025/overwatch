@@ -19,7 +19,7 @@ from sqlalchemy.engine import make_url
 import yaml
 
 from .. import knowledge
-from ..datalayer import source_config
+from ..datalayer import LIVE_CATALOG, datasource_name, source_config
 from .docker import discover_docker
 from .kubernetes import discover_kubernetes
 from .loki import discover_loki
@@ -229,18 +229,23 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
             s = discover_sql(name, url, target="zetaris" if zetaris else "direct")
             if zetaris:
                 plan["databases"][name] = sqlalchemy_url(url)  # registered with Zetaris; the secret goes to .env
-                if s["dialect"] == "postgresql":  # live internals (sessions, locks, indexes) are not tables Zetaris can register
-                    plan["sources"][f"{name}_live"] = {"type": "postgres", "url": sqlalchemy_url(url)}
-                    direct = discover_sql(name, url, target="direct")  # the live-session evidence only exists there
-                    s["evidence"] = s["evidence"] + [{**e, "source": f"{name}_live"} for e in direct["evidence"]
-                                                     if "pg_stat_activity" in e.get("query", "")]
+                if s["dialect"] == "postgresql":
+                    # Live internals (sessions, locks) reach Zetaris as datasource views (see datalayer.LIVE_VIEWS), so the
+                    # Investigator reads them there like any table. The direct source stays for the Watcher's own checks.
+                    plan["sources"][f"{name}_live"] = {"type": "postgres", "url": sqlalchemy_url(url), "internal": True}
+                    ds = datasource_name(name)
+                    direct = discover_sql(name, url, target="direct")  # the live-session evidence is written for Postgres
+                    s["evidence"] = s["evidence"] + [
+                        {**e, "source": "zetaris", "query": (
+                            f"SELECT application_name, state, wait_event_type, wait_event, query, running_seconds, blocked_by "
+                            f"FROM {ds}.live_sessions WHERE state <> 'idle' ORDER BY running_seconds DESC LIMIT 10")}
+                        for e in direct["evidence"] if "pg_stat_activity" in e.get("query", "")]
                     svc = _database_service(url, plan["services"]) or name
                     plan["checks"].append(_connections_check(name, f"{name}_live", svc))
                     if s.get("pg_activity"):
                         plan["checks"].append(_slow_query_check(name, f"{name}_live", svc))
-                    s["catalog"] += (f"\n  Live Postgres internals are NOT in Zetaris. Query source {name}_live (PostgreSQL SQL) for: "
-                                     "pg_stat_activity (who is connected, what they run and wait on), pg_locks, pg_indexes, "
-                                     "pg_stat_user_tables (seq_scan vs idx_scan), pg_stat_statements (if enabled).")
+                    s["catalog"] += ("\n  Live Postgres internals are in Zetaris too: " + LIVE_CATALOG.format(n=ds) +
+                                     "; pg_stat_statements is a table when the extension is enabled.")
             else:
                 plan["sources"][name] = {"type": "postgres" if s["dialect"] == "postgresql" else "sql",
                                          "url": sqlalchemy_url(url)}
@@ -250,7 +255,8 @@ def discover(docker: dict[str, Any] | None = None, prometheus_url: str = "",
                     if s.get("pg_activity"):
                         plan["checks"].append(_slow_query_check(name, name, svc))
             plan["catalog"].append(s["catalog"])
-            plan["checks"] += s["checks"]
+            dq_service = _database_service(url, plan["services"]) or name
+            plan["checks"] += [{**c, "service": dq_service} if c["name"].startswith("dq_") else c for c in s["checks"]]
             plan["evidence"] += s["evidence"]
             plan["notes"] += s["notes"]
             for svc in s["services"]:
@@ -457,7 +463,7 @@ def render(plan: dict[str, Any], llm: dict[str, str] | None = None) -> tuple[str
         doc["evidence"] = evidence
     doc["checks"] = checks
     settings = plan.get("settings") or {}
-    doc["watch"] = {"interval_seconds": 10, "confirm_samples": 2,
+    doc["watch"] = {"interval_seconds": 5, "confirm_samples": 2,
                     **{k: int(v) for k, v in (settings.get("watch") or {}).items() if v not in (None, "")}}
     doc["llm"] = {
         "base_url": "${LLM_BASE_URL:-http://127.0.0.1:8088/v1}",

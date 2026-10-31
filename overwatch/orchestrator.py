@@ -112,6 +112,26 @@ class Overwatch:
             register(databases)
         except Exception as e:  # Zetaris is down or unreachable: the console shows it, watching goes on
             self.events.emit("source.error", message=f"registering databases with Zetaris: {e}")
+            return
+        if self.own_data["dialect"] == "spark":
+            threading.Thread(target=self._create_usl, daemon=True, name="create-usl").start()
+
+    def _create_usl(self) -> None:
+        """Build the Unified Semantic Layer (the `usl` views) over Overwatch's history and Prometheus. In the background,
+        on its own connection: it must never hold up startup or share the Investigator's session."""
+        from .datalayer import create_usl
+        from .sources.zetaris import ZetarisSource
+
+        src = None
+        try:
+            src = ZetarisSource("zetaris-usl", self.cfg.sources[self.own_data["source"]])
+            create_usl(src)
+            self.events.emit("usl.ready", views=["usl.check_health", "usl.container_status", "usl.quality_results", "usl.incident_history", "usl.change_impact"])
+        except Exception as e:
+            self.events.emit("source.error", message=f"building the semantic layer (usl): {e}")
+        finally:
+            if src is not None:
+                src.close()
 
     def _with_builtin_sources(self, cfg: Config) -> dict[str, dict[str, Any]]:
         """Add the read-only `overwatch` change log (and describe the built-ins) so they work with no setup."""
@@ -138,6 +158,19 @@ class Overwatch:
             f"config change reported to or learned by Overwatch. {p}check_samples(ts TEXT ISO-8601 UTC, check_name, "
             f"service, value, failing 0/1): every check's value on every pass for the last 7 days. {where}"
         )
+        if own["dialect"] == "spark":
+            notes.append(
+                "Semantic layer (Zetaris, ready a few seconds after startup; use these first when they answer the question): "
+                "usl.check_health(check_name, service, samples, avg_value, max_value, pct_time_failing), "
+                "usl.container_status(service, container, state, restarts, health, ts): the newest row per container, "
+                "usl.quality_results(rule, rows_breaking_rule, ts): the latest result of each data quality rule (a check named "
+                "dq_*; more than 0 means rows break the rule), usl.target_status(service, job, up, container_state, restarts): "
+                "Prometheus targets joined with container state, usl.incident_history(id, opened_at, status, severity, "
+                "origin_service, root_cause, confidence, recovered_at, quotes_verified, quotes_total): every incident Overwatch "
+                "has handled, usl.change_impact(change_ts, service, version, kind, description, samples_after, "
+                "failing_samples_after, checks_failing_after): each release or config change with what its service's checks "
+                "did in the 15 minutes after it."
+            )
         if any(s.get("type") == "docker" for s in sources.values()) and own["dialect"] == "spark":
             notes.append(
                 f"Docker, as tables (recent, refreshed every ~10 s): {p}container_state(ts, service, container, state "
@@ -306,6 +339,8 @@ class Overwatch:
                 self.last_opened[a.check] = time.time()
         self._save(incident)
         self.events.emit("incident.opened", incident=incident.to_dict())
+        self.refresh_spread(incident)  # no queries: the map shows the blast radius now, not after the evidence pack
+        self._save(incident)
         return incident
 
     def handle(self, anomalies: list[Anomaly], on_update: Callable[[Incident], None] | None = None) -> Incident:

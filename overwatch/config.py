@@ -59,6 +59,7 @@ class CheckConfig:
     relative_factor: float | None = None  # alert when value > factor x this check's own recent median
     relative_min: float = 0.0  # ...and the value is at least this (ignores noise on tiny baselines)
     baseline_minutes: int = 30
+    every_seconds: int = 0  # slow checks (data quality rules): run in the background this often; the Watcher reads the last result
     enabled: bool = True  # switched off from the console's settings page
 
 

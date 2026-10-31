@@ -13,7 +13,7 @@ const STEPS = [
 type Step = (typeof STEPS)[number]["id"];
 
 const DEFAULT_WATCH: WatchSettings = {
-  interval_seconds: 10, confirm_samples: 2, cooldown_seconds: 600, merge_window_seconds: 300,
+  interval_seconds: 5, confirm_samples: 2, cooldown_seconds: 600, merge_window_seconds: 300,
   resolve_after_seconds: 60, max_parallel_investigations: 2,
 };
 

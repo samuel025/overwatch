@@ -57,6 +57,53 @@ def write_warning(name: str, account: dict[str, Any] | None) -> str | None:
             "GRANT pg_read_all_stats TO overwatch; then use that account in the connection string.")
 
 
+NUMERIC = ("int", "numeric", "decimal", "double", "float", "real")
+NEVER_NEGATIVE = re.compile(r"(^|_)(count|amount|quantity|qty|total|price|balance|clicks?)(_|$)")
+CREATED = re.compile(r"^(created|created_at|created_on)$")
+LATER = re.compile(r"^(expires_at|expired_at|ended_at|finished_at|completed_at|closed_at|resolved_at|updated_at|deleted_at)$")
+QUALITY_EVERY_SECONDS = 300
+MAX_QUALITY_RULES = 6
+WINDOW_ABOVE_ROWS = 5_000_000  # tables bigger than this are checked on recent rows only, so a rule stays cheap
+
+
+def quality_rules(name: str, tables: list[dict[str, Any]], rows_estimate: dict[str, int], qual, since, source: str) -> list[dict[str, Any]]:
+    """Data quality rules found from column names and types, as checks that count rows breaking a rule (threshold 0).
+    Two kinds: a column that should never be negative (a count, amount, quantity, price or balance), and a later
+    timestamp that comes before its row's creation time. Recent rows only when the table says when it was created,
+    so a rule stays cheap on a big table. They run in the background (every_seconds), never in the 5-second pass."""
+    rules: list[dict[str, Any]] = []
+    for t in tables:
+        if t["name"].startswith("pg_") or len(rules) >= MAX_QUALITY_RULES:
+            continue
+        cols = {c["name"]: str(c["type"]).lower() for c in t["columns"]}
+        created = next((c for c in cols if CREATED.match(c) and any(x in cols[c] for x in TS_TYPES)), None)
+        big = rows_estimate.get(t["name"], 0) > WINDOW_ABOVE_ROWS
+        recent = f" AND {created} > {since(1, 'day')}" if created and big else ""
+        small = created is not None or rows_estimate.get(t["name"], 0) <= 200_000  # no creation time: only a small table is scanned whole
+
+        def rule(slug: str, breaks: str, text: str) -> None:
+            # count the breaking rows with CASE inside the aggregate: Zetaris 2.4.3 returns every row for a WHERE that
+            # compares two columns (WHERE a < b), so the comparison must not be in a WHERE
+            where = f" WHERE {recent[5:]}" if recent else ""
+            rules.append({
+                "name": f"dq_{t['name']}_{slug}", "service": name, "source": source,
+                "query": f"SELECT coalesce(sum(CASE WHEN {breaks} THEN 1 ELSE 0 END), 0) AS value FROM {qual(t['name'])}{where}",
+                "threshold": 0, "comparison": ">", "every_seconds": QUALITY_EVERY_SECONDS, "severity": "medium",
+                "description": f"data quality: {text}" + (" (rows from the last day)" if recent else ""),
+                "why": f"data quality rule on {t['name']}: alerts when any row breaks it; checked every 5 minutes in the background",
+            })
+
+        if small:
+            for c, typ in cols.items():
+                if NEVER_NEGATIVE.search(c) and any(x in typ for x in NUMERIC):
+                    rule(f"{c}_negative", f"{c} < 0", f"{t['name']}.{c} is negative")
+        if created:
+            for c, typ in cols.items():
+                if LATER.match(c) and any(x in typ for x in TS_TYPES):
+                    rule(f"{c}_before_created", f"{c} IS NOT NULL AND {c} < {created}", f"{t['name']}.{c} is earlier than {created}")
+    return rules[:MAX_QUALITY_RULES]
+
+
 def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direct") -> dict[str, Any]:
     """Inspect a database. `target` is where the generated checks and evidence will run: "direct" (its own
     dialect, plain table names) or "zetaris" (Spark SQL, tables qualified as <name>.<table>)."""
@@ -240,6 +287,8 @@ def discover_sql(name: str, url: str, max_tables: int = 40, target: str = "direc
                      "clock_timestamp() - query_start AS running_for FROM pg_stat_activity "
                      "WHERE state <> 'idle' AND pid <> pg_backend_pid() ORDER BY query_start LIMIT 10",
         })
+
+    checks += quality_rules(name, tables, rows_estimate, qual, since, "zetaris" if zet else name)
 
     notes = []
     if pg and (w := write_warning(name, pg_health.get("account"))):

@@ -135,10 +135,19 @@ Each check is a query that returns one number (the first numeric column of the f
 | `no_data` | `ignore` | `alert`: a query that returns no value is itself an incident (the service went silent) |
 | `kind` | `metric` | `heartbeat`: when this check fires, the service is shown as **Not responding**. `probe`: Overwatch calls `url` itself (no `source`/`query`). `container`: number of running Docker containers for `service` (needs `docker:`) |
 | `url`, `timeout_ms` | — / `2000` | For `probe` checks: the health URL and its timeout |
+| `every_seconds` | `0` | Run this check in the background at most this often and let the Watcher read its last result (data quality rules use `300`), so a slow query never holds up the pass |
 | `description` | `""` | Human description shown in alerts and reports |
 | `severity` | `medium` | `low`, `medium`, `high`, `critical` |
 
 A check needs a `threshold`, a `relative_factor`, or both.
+
+**Data quality rules.** With a database connected, discovery adds checks named `dq_<table>_<rule>` that count the rows breaking a rule (`threshold: 0`, `every_seconds: 300`): a column named like a count, amount, quantity, price or balance that goes below zero, and a timestamp such as `expires_at` or `updated_at` earlier than `created_at`. Tables over 5 million rows are checked on the last day's rows only. They count with `sum(CASE WHEN ... THEN 1 ELSE 0 END)`, not a `WHERE` comparing two columns, because Zetaris 2.4.3 returns every row for that. Turn one off like any check on the settings page.
+
+**The semantic layer.** With Zetaris as the data layer, Overwatch creates the SchemaStore container `usl` at startup (in the background, safe to repeat): `usl.check_health` (each check's average, maximum and share of time failing), `usl.container_status` (the newest row per container), `usl.quality_results` (the latest result of each `dq_*` rule), `usl.incident_history` (every incident Overwatch has handled: cause, severity, confidence, how many quotes were verified), `usl.change_impact` (each release or config change with what its service's checks did in the 15 minutes after it) and, with Prometheus connected, `usl.target_status` (Prometheus targets joined with container state). Code: `usl_statements` and `create_usl` in `overwatch/datalayer.py`.
+
+**The governed model.** Overwatch also compiles a Zetaris Unified Semantic Layer, the object that appears under Data Product > Unified Semantic Layer in the Zetaris UI: `lightning.metastore.overwatch.incident_response`, with tables `service`, `incident` and `change_event`, primary and foreign keys (a change must point at a known service, which Zetaris turns into a data quality rule), and descriptions. Each table is activated with a SELECT over Overwatch's history, so it stays live. Query it as `lightning.metastore.overwatch.incident_response.<table>`. Code: `usl_object_statements` in `overwatch/datalayer.py`.
+
+**Live Postgres internals, through Zetaris.** Registering a database brings in its tables, not `pg_stat_activity` or `pg_locks`. For each registered PostgreSQL database Overwatch also creates three Zetaris datasource views, which run inside that database and add nothing to its schema: `<db>.live_sessions` (who is connected, what they run or wait on, and which pids block them), `<db>.live_locks` (current table locks; `granted = false` is a waiter) and `<db>.live_table_stats` (sequential and index scans, dead rows). The Investigator reads them like any table, so every query it writes goes through Zetaris. The direct Postgres connection (`<db>_live`) is marked `internal` and serves the Watcher's connection and slow-query checks only. Code: `LIVE_VIEWS` in `overwatch/datalayer.py`.
 
 Example heartbeat (liveness from container state, not from traffic):
 
@@ -378,7 +387,7 @@ catalog: |
       one row per instance every 10 seconds; error_rate is 0..1
     deploys(ts timestamptz, service text, version text, description text)
       every release and config change, all teams
-    Postgres views on appdb: pg_stat_activity, pg_locks, pg_stat_statements, pg_indexes
+    appdb.live_sessions, appdb.live_locks, appdb.live_table_stats: live Postgres internals (views Zetaris runs inside appdb)
 ```
 
 ---
